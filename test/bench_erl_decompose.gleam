@@ -36,6 +36,8 @@ import gleam/io
 @target(erlang)
 import gleam/list
 @target(erlang)
+import gleam/option.{None, Some}
+@target(erlang)
 import gleam/string
 @target(erlang)
 import gleam/time/duration
@@ -49,7 +51,10 @@ import osler/internal.{
 }
 
 @target(erlang)
-import osler/parser
+import osler/parser.{
+  DateTimeSeparator, Day2, Hour24Padded, IsoDate, IsoNaiveDateTime, IsoOffset,
+  IsoTime, Literal, Milli, Minute2, Month2, OffsetColon, Second2, Year4,
+}
 
 @target(erlang)
 const input = "2024-06-13T23:04:00.009+10:00"
@@ -222,6 +227,226 @@ fn l9_parse_ixdtf(str: String) -> Int {
   case osler.parse_ixdtf(str) {
     Error(Nil) -> 0
     Ok(_) -> 1
+  }
+}
+
+// --- directive engine -------------------------------------------------------
+
+@target(erlang)
+const d_compound = [IsoDate, DateTimeSeparator, IsoTime, IsoOffset]
+
+@target(erlang)
+const d_naive = [IsoNaiveDateTime, IsoOffset]
+
+@target(erlang)
+const d_fine = [
+  Year4,
+  Literal("-"),
+  Month2,
+  Literal("-"),
+  Day2,
+  Literal("T"),
+  Hour24Padded,
+  Literal(":"),
+  Minute2,
+  Literal(":"),
+  Second2,
+  Literal("."),
+  Milli,
+  OffsetColon,
+]
+
+@target(erlang)
+fn d1_compound(str: String) -> Int {
+  case parser.parse(str, d_compound) {
+    Error(Nil) -> 0
+    Ok(_) -> 1
+  }
+}
+
+@target(erlang)
+fn d2_naive(str: String) -> Int {
+  case parser.parse(str, d_naive) {
+    Error(Nil) -> 0
+    Ok(_) -> 1
+  }
+}
+
+@target(erlang)
+fn d3_fine(str: String) -> Int {
+  case parser.parse(str, d_fine) {
+    Error(Nil) -> 0
+    Ok(_) -> 1
+  }
+}
+
+// --- parse_any --------------------------------------------------------------
+
+@target(erlang)
+const any_full = "Meeting on 2024/06/22 at 1:42 PM in -04:00"
+
+@target(erlang)
+const any_iso = "2024-06-13T13:42:11.314+10:00"
+
+@target(erlang)
+const any_date = "2024/06/22"
+
+@target(erlang)
+const any_none = "just some words with nothing in them at all"
+
+// Non-matching text of increasing length, to characterise the complexity of
+// the scan rather than guess at it.
+@target(erlang)
+const any_n10 = "abcd efgh "
+
+@target(erlang)
+const any_n20 = "abcd efgh abcd efgh "
+
+@target(erlang)
+const any_n40 = "abcd efgh abcd efgh abcd efgh abcd efgh "
+
+@target(erlang)
+const any_n80 = "abcd efgh abcd efgh abcd efgh abcd efgh abcd efgh abcd efgh abcd efgh abcd efgh "
+
+@target(erlang)
+fn a_any(str: String) -> Int {
+  case osler.parse_any(str) {
+    #(None, None, None) -> 1
+    _ -> 2
+  }
+}
+
+// --- Q1: what the result shape costs on BEAM --------------------------------
+//
+// A Gleam record compiles to a tagged tuple here, so "record vs tuple" is a
+// question about one extra atom element. The `Option` wrappers are the other
+// candidate. Built from constants, so this is construction cost only.
+
+@target(erlang)
+fn q1_baseline(str: String) -> Int {
+  string.byte_size(str)
+}
+
+@target(erlang)
+fn q1_parts_options(str: String) -> Int {
+  let n = string.byte_size(str)
+  let p =
+    parser.Parts(
+      Some(n),
+      Some(6),
+      Some(13),
+      Some(23),
+      None,
+      None,
+      Some(4),
+      Some(0),
+      Some(9_000_000),
+      Some(600),
+      None,
+      [],
+    )
+  case p {
+    parser.Parts(year: Some(_), ..) -> 1
+    _ -> 0
+  }
+}
+
+@target(erlang)
+fn q1_tuple_options(str: String) -> Int {
+  let n = string.byte_size(str)
+  // Built through a branch so the compiler cannot narrow the field to `Some`
+  // and warn that the `None` arm below is unreachable.
+  let first = case n > 0 {
+    True -> Some(n)
+    False -> None
+  }
+  let p = #(
+    first,
+    Some(6),
+    Some(13),
+    Some(23),
+    None,
+    None,
+    Some(4),
+    Some(0),
+    Some(9_000_000),
+    Some(600),
+    None,
+    [],
+  )
+  case p.0 {
+    Some(v) -> v
+    None -> 0
+  }
+}
+
+@target(erlang)
+fn q1_tuple_bare(str: String) -> Int {
+  let n = string.byte_size(str)
+  let p = #(n, 6, 13, 23, -1, -1, 4, 0, 9_000_000, 600, -1, [])
+  case p.0 > 0 {
+    True -> 1
+    False -> 0
+  }
+}
+
+// --- Q2: per-directive loop + dispatch overhead ------------------------------
+//
+// `Separator` succeeds without consuming anything on this input, so the slope
+// between a 7- and a 21-directive list is the engine's per-directive cost:
+// the `run` step, the `case directive` dispatch, and the `Ok(#(parts, bytes))`
+// it allocates to hand control back. That is the ceiling on what a
+// pre-compiled plan could remove.
+
+@target(erlang)
+const seps7 = [
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+]
+
+@target(erlang)
+const seps21 = [
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+  parser.Separator,
+]
+
+@target(erlang)
+fn q2_seps7(str: String) -> Int {
+  case parser.parse(str, seps7) {
+    Ok(_) -> 1
+    Error(_) -> 0
+  }
+}
+
+@target(erlang)
+fn q2_seps21(str: String) -> Int {
+  case parser.parse(str, seps21) {
+    Ok(_) -> 1
+    Error(_) -> 0
   }
 }
 
@@ -1269,6 +1494,37 @@ fn loop(f: fn(String) -> Int, str: String, n: Int, acc: Int) -> Int {
   }
 }
 
+// `parse_any` is microseconds per call, not nanoseconds, so it gets its own
+// iteration count -- at the shared 200k x 25 the longer inputs run for many
+// minutes. That difference in scale is itself the headline finding.
+@target(erlang)
+const slow_iterations = 2000
+
+@target(erlang)
+fn measure_slow(f: fn(String) -> Int, str: String) -> Float {
+  measure_slow_loop(f, str, 7, 1.0e18)
+}
+
+@target(erlang)
+fn measure_slow_loop(
+  f: fn(String) -> Int,
+  str: String,
+  remaining: Int,
+  best: Float,
+) -> Float {
+  case remaining {
+    0 -> best
+    _ -> {
+      let start = timestamp.system_time()
+      let _ = loop(f, str, slow_iterations, 0)
+      let elapsed = timestamp.difference(start, timestamp.system_time())
+      let ns =
+        duration.to_seconds(elapsed) *. 1.0e9 /. int.to_float(slow_iterations)
+      measure_slow_loop(f, str, remaining - 1, float.min(best, ns))
+    }
+  }
+}
+
 @target(erlang)
 /// Nanoseconds per op, minimum over `rounds` timed runs of `iterations` calls.
 fn measure(f: fn(String) -> Int, str: String) -> Float {
@@ -1329,6 +1585,17 @@ pub fn main() {
           l8_parse_timestamp(input),
           l9_parse_ixdtf(input),
           ln_native(input),
+          d1_compound(input),
+          d2_naive(input),
+          d3_fine(input),
+          a_any(any_full),
+          a_any(any_none),
+          q1_baseline(input),
+          q1_parts_options(input),
+          q1_tuple_options(input),
+          q1_tuple_bare(input),
+          q2_seps7(input),
+          q2_seps21(input),
           l6_parse_ixdtf_fast(input_suffix),
           l6_parse_ixdtf_fast(general_no_suffix),
           l6_parse_ixdtf_fast(general_zone),
@@ -1407,6 +1674,60 @@ pub fn main() {
     #("--  duration.minutes alone", measure(l10_duration_minutes, input)),
   ]
   list.each(rows, fn(r) { row(r.0, r.1, base) })
+
+  io.println("")
+  io.println("the directive engine, same input")
+  io.println(string.repeat("-", 58))
+  list.each(
+    [
+      #(
+        "D1  parse [IsoDate, T, IsoTime, IsoOffset]",
+        measure(d1_compound, input),
+      ),
+      #("D2  parse [IsoNaiveDateTime, IsoOffset]", measure(d2_naive, input)),
+      #("D3  parse fine-grained (14 directives)", measure(d3_fine, input)),
+      #(
+        "--  parser.parse_ixdtf (fixed grammar)",
+        measure(l7_parser_parse_ixdtf, input),
+      ),
+    ],
+    fn(r) { row(r.0, r.1, base) },
+  )
+
+  io.println("")
+  io.println("parse_any")
+  io.println(string.repeat("-", 58))
+  list.each(
+    [
+      #(
+        "A1  parse_any, date+time+offset in prose",
+        measure_slow(a_any, any_full),
+      ),
+      #("A2  parse_any, ISO timestamp", measure_slow(a_any, any_iso)),
+      #("A3  parse_any, bare date", measure_slow(a_any, any_date)),
+      #("A4  parse_any, no match (worst case)", measure_slow(a_any, any_none)),
+      #("A5  no-match, n=10", measure_slow(a_any, any_n10)),
+      #("A6  no-match, n=20", measure_slow(a_any, any_n20)),
+      #("A7  no-match, n=40", measure_slow(a_any, any_n40)),
+      #("A8  no-match, n=80", measure_slow(a_any, any_n80)),
+    ],
+    fn(r) { row(r.0, r.1, base) },
+  )
+
+  io.println("")
+  io.println("Q1 result shape / Q2 per-directive overhead")
+  io.println(string.repeat("-", 58))
+  list.each(
+    [
+      #("Q1  string.byte_size alone (baseline)", measure(q1_baseline, input)),
+      #("Q1  Parts of 12 Options", measure(q1_parts_options, input)),
+      #("Q1  tuple of 12 Options", measure(q1_tuple_options, input)),
+      #("Q1  tuple of 12 bare ints", measure(q1_tuple_bare, input)),
+      #("Q2  parse 7 x Separator", measure(q2_seps7, input)),
+      #("Q2  parse 21 x Separator", measure(q2_seps21, input)),
+    ],
+    fn(r) { row(r.0, r.1, base) },
+  )
 
   io.println("")
   io.println("the general (non-canonical / suffixed) path")

@@ -318,6 +318,19 @@ pub fn parse(input: String, directives: List(Directive)) -> Result(Parts, Nil) {
   }
 }
 
+// `run` and `step` are mutually recursive rather than `run` calling `step` and
+// inspecting what comes back. Every directive used to hand control home as an
+// `Ok(#(parts, bytes))` -- two allocations per directive, purely as a
+// return-value protocol -- which measured ~66ns of per-directive engine
+// overhead against a 14-directive parse. Now each branch tail-calls `run`
+// with the remaining directives, so nothing is allocated to describe
+// "continue"; only a genuine failure allocates, and `Error(Nil)` is a
+// constant. The helpers below (`with_int`, `keep`, `with_ampm`, and the
+// `consume_*` family) take `ds` and tail-call `run` for the same reason.
+//
+// `step`'s `case directive` stays exhaustive over all 40 variants with no
+// catch-all, so adding a `Directive` is still a compile error until it is
+// handled here.
 fn run(
   bytes: BitArray,
   directives: List(Directive),
@@ -325,146 +338,292 @@ fn run(
 ) -> Result(#(Parts, BitArray), Nil) {
   case directives {
     [] -> Ok(#(parts, bytes))
-    [directive, ..rest] ->
-      case step(directive, bytes, parts) {
-        Ok(#(parts, bytes)) -> run(bytes, rest, parts)
-        Error(Nil) -> Error(Nil)
-      }
+    [directive, ..ds] -> step(directive, ds, bytes, parts)
   }
 }
 
 fn step(
   directive: Directive,
+  ds: List(Directive),
   bytes: BitArray,
   parts: Parts,
 ) -> Result(#(Parts, BitArray), Nil) {
   case directive {
     Year4 ->
-      with_int(internal.parse_4_digits(bytes), fn(v) {
-        Parts(..parts, year: Some(v))
-      })
+      case bytes {
+        <<b1, b2, b3, b4, rest:bytes>>
+          if b1 >= 0x30
+          && b1 <= 0x39
+          && b2 >= 0x30
+          && b2 <= 0x39
+          && b3 >= 0x30
+          && b3 <= 0x39
+          && b4 >= 0x30
+          && b4 <= 0x39
+        ->
+          run(
+            rest,
+            ds,
+            Parts(
+              ..parts,
+              year: Some(
+                { b1 - 0x30 }
+                * 1000
+                + { b2 - 0x30 }
+                * 100
+                + { b3 - 0x30 }
+                * 10
+                + { b4 - 0x30 },
+              ),
+            ),
+          )
+        _ -> Error(Nil)
+      }
     Month ->
-      with_int(internal.parse_1_or_2_digits(bytes), fn(v) {
+      with_int(internal.parse_1_or_2_digits(bytes), ds, fn(v) {
         Parts(..parts, month: Some(v))
       })
     Month2 ->
-      with_int(internal.parse_2_digits(bytes), fn(v) {
-        Parts(..parts, month: Some(v))
-      })
+      case bytes {
+        <<b1, b2, rest:bytes>>
+          if b1 >= 0x30 && b1 <= 0x39 && b2 >= 0x30 && b2 <= 0x39
+        ->
+          run(
+            rest,
+            ds,
+            Parts(..parts, month: Some({ b1 - 0x30 } * 10 + { b2 - 0x30 })),
+          )
+        _ -> Error(Nil)
+      }
     MonthShortName ->
-      with_int(consume_month_short(bytes), fn(v) {
+      with_int(consume_month_short(bytes), ds, fn(v) {
         Parts(..parts, month: Some(v))
       })
     MonthLongName ->
-      with_int(consume_month_long(bytes), fn(v) {
+      with_int(consume_month_long(bytes), ds, fn(v) {
         Parts(..parts, month: Some(v))
       })
     Day ->
-      with_int(internal.parse_1_or_2_digits(bytes), fn(v) {
+      with_int(internal.parse_1_or_2_digits(bytes), ds, fn(v) {
         Parts(..parts, day: Some(v))
       })
     Day2 ->
-      with_int(internal.parse_2_digits(bytes), fn(v) {
-        Parts(..parts, day: Some(v))
-      })
-    WeekdayNumber -> keep(consume_weekday_number(bytes), parts)
-    WeekdayShortName2 -> keep(consume_weekday_2(bytes), parts)
-    WeekdayShortName -> keep(consume_weekday_3(bytes), parts)
-    WeekdayLongName -> keep(consume_weekday_long(bytes), parts)
+      case bytes {
+        <<b1, b2, rest:bytes>>
+          if b1 >= 0x30 && b1 <= 0x39 && b2 >= 0x30 && b2 <= 0x39
+        ->
+          run(
+            rest,
+            ds,
+            Parts(..parts, day: Some({ b1 - 0x30 } * 10 + { b2 - 0x30 })),
+          )
+        _ -> Error(Nil)
+      }
+    WeekdayNumber -> keep(consume_weekday_number(bytes), ds, parts)
+    WeekdayShortName2 -> keep(consume_weekday_2(bytes), ds, parts)
+    WeekdayShortName -> keep(consume_weekday_3(bytes), ds, parts)
+    WeekdayLongName -> keep(consume_weekday_long(bytes), ds, parts)
     Hour24 ->
-      with_int(internal.parse_1_or_2_digits(bytes), fn(v) {
+      with_int(internal.parse_1_or_2_digits(bytes), ds, fn(v) {
         Parts(..parts, hour: Some(v))
       })
     Hour24Padded ->
-      with_int(internal.parse_2_digits(bytes), fn(v) {
-        Parts(..parts, hour: Some(v))
-      })
+      case bytes {
+        <<b1, b2, rest:bytes>>
+          if b1 >= 0x30 && b1 <= 0x39 && b2 >= 0x30 && b2 <= 0x39
+        ->
+          run(
+            rest,
+            ds,
+            Parts(..parts, hour: Some({ b1 - 0x30 } * 10 + { b2 - 0x30 })),
+          )
+        _ -> Error(Nil)
+      }
     Hour12 ->
-      with_int(internal.parse_1_or_2_digits(bytes), fn(v) {
+      with_int(internal.parse_1_or_2_digits(bytes), ds, fn(v) {
         Parts(..parts, twelve_hour: Some(v))
       })
     Hour12Padded ->
-      with_int(internal.parse_2_digits(bytes), fn(v) {
-        Parts(..parts, twelve_hour: Some(v))
-      })
-    MeridiemLower -> with_ampm(consume_meridiem_lower(bytes), parts)
-    MeridiemUpper -> with_ampm(consume_meridiem_upper(bytes), parts)
+      case bytes {
+        <<b1, b2, rest:bytes>>
+          if b1 >= 0x30 && b1 <= 0x39 && b2 >= 0x30 && b2 <= 0x39
+        ->
+          run(
+            rest,
+            ds,
+            Parts(
+              ..parts,
+              twelve_hour: Some({ b1 - 0x30 } * 10 + { b2 - 0x30 }),
+            ),
+          )
+        _ -> Error(Nil)
+      }
+    MeridiemLower -> with_ampm(consume_meridiem_lower(bytes), ds, parts)
+    MeridiemUpper -> with_ampm(consume_meridiem_upper(bytes), ds, parts)
     Minute ->
-      with_int(internal.parse_1_or_2_digits(bytes), fn(v) {
+      with_int(internal.parse_1_or_2_digits(bytes), ds, fn(v) {
         Parts(..parts, minute: Some(v))
       })
     Minute2 ->
-      with_int(internal.parse_2_digits(bytes), fn(v) {
-        Parts(..parts, minute: Some(v))
-      })
+      case bytes {
+        <<b1, b2, rest:bytes>>
+          if b1 >= 0x30 && b1 <= 0x39 && b2 >= 0x30 && b2 <= 0x39
+        ->
+          run(
+            rest,
+            ds,
+            Parts(..parts, minute: Some({ b1 - 0x30 } * 10 + { b2 - 0x30 })),
+          )
+        _ -> Error(Nil)
+      }
     Second ->
-      with_int(internal.parse_1_or_2_digits(bytes), fn(v) {
+      with_int(internal.parse_1_or_2_digits(bytes), ds, fn(v) {
         Parts(..parts, second: Some(v))
       })
     Second2 ->
-      with_int(internal.parse_2_digits(bytes), fn(v) {
-        Parts(..parts, second: Some(v))
-      })
+      case bytes {
+        <<b1, b2, rest:bytes>>
+          if b1 >= 0x30 && b1 <= 0x39 && b2 >= 0x30 && b2 <= 0x39
+        ->
+          run(
+            rest,
+            ds,
+            Parts(..parts, second: Some({ b1 - 0x30 } * 10 + { b2 - 0x30 })),
+          )
+        _ -> Error(Nil)
+      }
     Milli ->
-      with_int(internal.parse_n_digits(bytes, 3), fn(v) {
-        Parts(..parts, nanosecond: Some(v * 1_000_000))
-      })
+      case bytes {
+        <<b1, b2, b3, rest:bytes>>
+          if b1 >= 0x30
+          && b1 <= 0x39
+          && b2 >= 0x30
+          && b2 <= 0x39
+          && b3 >= 0x30
+          && b3 <= 0x39
+        ->
+          run(
+            rest,
+            ds,
+            Parts(
+              ..parts,
+              nanosecond: Some(
+                { { b1 - 0x30 } * 100 + { b2 - 0x30 } * 10 + { b3 - 0x30 } }
+                * 1_000_000,
+              ),
+            ),
+          )
+        _ -> Error(Nil)
+      }
     Micro ->
-      with_int(internal.parse_n_digits(bytes, 6), fn(v) {
+      with_int(internal.parse_n_digits(bytes, 6), ds, fn(v) {
         Parts(..parts, nanosecond: Some(v * 1000))
       })
     Nano ->
-      with_int(internal.parse_n_digits(bytes, 9), fn(v) {
+      with_int(internal.parse_n_digits(bytes, 9), ds, fn(v) {
         Parts(..parts, nanosecond: Some(v))
       })
+    // `Z` and `(+-)HH:MM` inline; every other offset shape falls through to
+    // the general scanner, which is where it was already going.
     Offset | OffsetZulu | OffsetColon | OffsetNoColon | IsoOffset ->
-      with_int(internal.parse_offset_fast(bytes), fn(v) {
-        Parts(..parts, offset_minutes: Some(v))
-      })
-    Gmt -> consume_gmt(bytes, parts)
-    ZoneName -> consume_zone(bytes, parts)
-    ExtensionTags -> consume_tags(bytes, parts)
-    Literal(lit) -> consume_literal(bytes, bit_array.from_string(lit), parts)
-    Separator -> Ok(#(parts, consume_separator(bytes)))
-    TimeSeparator -> Ok(#(parts, consume_time_separator(bytes)))
-    DateTimeSeparator -> consume_datetime_separator(bytes, parts)
+      case bytes {
+        <<b, rest:bytes>> if b == 0x5A || b == 0x7A ->
+          run(rest, ds, Parts(..parts, offset_minutes: Some(0)))
+
+        <<sg, h1, h2, 0x3A, m1, m2, rest:bytes>>
+          if { sg == 0x2B || sg == 0x2D }
+          && h1 >= 0x30
+          && h1 <= 0x39
+          && h2 >= 0x30
+          && h2 <= 0x39
+          && m1 >= 0x30
+          && m1 <= 0x39
+          && m2 >= 0x30
+          && m2 <= 0x39
+        -> {
+          let oh = { h1 - 0x30 } * 10 + { h2 - 0x30 }
+          let om = { m1 - 0x30 } * 10 + { m2 - 0x30 }
+          case oh > 24 || om > 60 {
+            True -> Error(Nil)
+            False ->
+              run(
+                rest,
+                ds,
+                Parts(
+                  ..parts,
+                  offset_minutes: Some(case sg == 0x2D {
+                    True -> -{ oh * 60 + om }
+                    False -> oh * 60 + om
+                  }),
+                ),
+              )
+          }
+        }
+
+        _ ->
+          with_int(internal.parse_offset_fast(bytes), ds, fn(v) {
+            Parts(..parts, offset_minutes: Some(v))
+          })
+      }
+    Gmt -> consume_gmt(bytes, ds, parts)
+    ZoneName -> consume_zone(bytes, ds, parts)
+    ExtensionTags -> consume_tags(bytes, ds, parts)
+    // Single-byte literals -- `"-"`, `":"`, `"."`, `"T"` -- are what real
+    // format lists are mostly made of, and handing `bytes` to
+    // `consume_literal` for one byte pays a sub-binary and a fresh match
+    // context for nothing. Longer literals still go the general way.
+    Literal(lit) ->
+      case bit_array.from_string(lit) {
+        <<b>> ->
+          case bytes {
+            <<c, rest:bytes>> if c == b -> run(rest, ds, parts)
+            _ -> Error(Nil)
+          }
+        lit_bytes -> consume_literal(bytes, lit_bytes, ds, parts)
+      }
+    Separator -> run(consume_separator(bytes), ds, parts)
+    TimeSeparator -> run(consume_time_separator(bytes), ds, parts)
+    DateTimeSeparator -> consume_datetime_separator(bytes, ds, parts)
     EndOfInput ->
       case internal.accept_end(bytes) {
-        Ok(Nil) -> Ok(#(parts, bytes))
+        Ok(Nil) -> run(bytes, ds, parts)
         Error(Nil) -> Error(Nil)
       }
-    IsoDate -> consume_iso_date(bytes, parts)
-    IsoTime -> consume_iso_time(bytes, parts)
-    IsoNaiveDateTime -> consume_iso_naive(bytes, parts)
+    IsoDate -> consume_iso_date(bytes, ds, parts)
+    IsoTime -> consume_iso_time(bytes, ds, parts)
+    IsoNaiveDateTime -> consume_iso_naive(bytes, ds, parts)
   }
 }
 
 fn with_int(
   res: Result(#(Int, BitArray), Nil),
+  ds: List(Directive),
   set: fn(Int) -> Parts,
 ) -> Result(#(Parts, BitArray), Nil) {
   case res {
-    Ok(#(v, rest)) -> Ok(#(set(v), rest))
+    Ok(#(v, rest)) -> run(rest, ds, set(v))
     Error(Nil) -> Error(Nil)
   }
 }
 
 fn with_ampm(
   res: Result(#(AmPm, BitArray), Nil),
+  ds: List(Directive),
   parts: Parts,
 ) -> Result(#(Parts, BitArray), Nil) {
   case res {
-    Ok(#(period, rest)) -> Ok(#(Parts(..parts, period: Some(period)), rest))
+    Ok(#(period, rest)) -> run(rest, ds, Parts(..parts, period: Some(period)))
     Error(Nil) -> Error(Nil)
   }
 }
 
 fn keep(
   res: Result(BitArray, Nil),
+  ds: List(Directive),
   parts: Parts,
 ) -> Result(#(Parts, BitArray), Nil) {
   case res {
-    Ok(rest) -> Ok(#(parts, rest))
+    Ok(rest) -> run(rest, ds, parts)
     Error(Nil) -> Error(Nil)
   }
 }
@@ -472,13 +631,15 @@ fn keep(
 fn consume_literal(
   bytes: BitArray,
   lit: BitArray,
+  ds: List(Directive),
   parts: Parts,
 ) -> Result(#(Parts, BitArray), Nil) {
   case lit {
-    <<>> -> Ok(#(parts, bytes))
+    <<>> -> run(bytes, ds, parts)
     <<b, lit_rest:bytes>> ->
       case bytes {
-        <<c, rest:bytes>> if c == b -> consume_literal(rest, lit_rest, parts)
+        <<c, rest:bytes>> if c == b ->
+          consume_literal(rest, lit_rest, ds, parts)
         _ -> Error(Nil)
       }
     _ -> Error(Nil)
@@ -507,24 +668,26 @@ fn consume_time_separator(bytes: BitArray) -> BitArray {
 
 fn consume_datetime_separator(
   bytes: BitArray,
+  ds: List(Directive),
   parts: Parts,
 ) -> Result(#(Parts, BitArray), Nil) {
   case bytes {
-    <<0x54, rest:bytes>> -> Ok(#(parts, rest))
-    <<0x74, rest:bytes>> -> Ok(#(parts, rest))
-    <<0x5F, rest:bytes>> -> Ok(#(parts, rest))
-    <<0x20, rest:bytes>> -> Ok(#(parts, rest))
+    <<0x54, rest:bytes>> -> run(rest, ds, parts)
+    <<0x74, rest:bytes>> -> run(rest, ds, parts)
+    <<0x5F, rest:bytes>> -> run(rest, ds, parts)
+    <<0x20, rest:bytes>> -> run(rest, ds, parts)
     _ -> Error(Nil)
   }
 }
 
 fn consume_gmt(
   bytes: BitArray,
+  ds: List(Directive),
   parts: Parts,
 ) -> Result(#(Parts, BitArray), Nil) {
   case bytes {
     <<"GMT":utf8, rest:bytes>> ->
-      Ok(#(Parts(..parts, offset_minutes: Some(0)), rest))
+      run(rest, ds, Parts(..parts, offset_minutes: Some(0)))
     _ -> Error(Nil)
   }
 }
@@ -629,25 +792,30 @@ fn consume_meridiem_upper(bytes: BitArray) -> Result(#(AmPm, BitArray), Nil) {
 
 fn consume_iso_date(
   bytes: BitArray,
+  ds: List(Directive),
   parts: Parts,
 ) -> Result(#(Parts, BitArray), Nil) {
   case internal.parse_date_fast(bytes) {
     Ok(#(year, month, day, rest)) ->
-      Ok(#(
-        Parts(..parts, year: Some(year), month: Some(month), day: Some(day)),
+      run(
         rest,
-      ))
+        ds,
+        Parts(..parts, year: Some(year), month: Some(month), day: Some(day)),
+      )
     Error(Nil) -> Error(Nil)
   }
 }
 
 fn consume_iso_time(
   bytes: BitArray,
+  ds: List(Directive),
   parts: Parts,
 ) -> Result(#(Parts, BitArray), Nil) {
   case internal.parse_time_fast(bytes) {
     Ok(#(hour, minute, second, nanosecond, rest)) ->
-      Ok(#(
+      run(
+        rest,
+        ds,
         Parts(
           ..parts,
           hour: Some(hour),
@@ -655,14 +823,14 @@ fn consume_iso_time(
           second: Some(second),
           nanosecond: Some(nanosecond),
         ),
-        rest,
-      ))
+      )
     Error(Nil) -> Error(Nil)
   }
 }
 
 fn consume_iso_naive(
   bytes: BitArray,
+  ds: List(Directive),
   parts: Parts,
 ) -> Result(#(Parts, BitArray), Nil) {
   case internal.parse_date_fast(bytes) {
@@ -674,8 +842,8 @@ fn consume_iso_naive(
         <<0x54, rest:bytes>>
         | <<0x74, rest:bytes>>
         | <<0x5F, rest:bytes>>
-        | <<0x20, rest:bytes>> -> consume_iso_time(rest, parts)
-        _ -> Ok(#(parts, rest))
+        | <<0x20, rest:bytes>> -> consume_iso_time(rest, ds, parts)
+        _ -> run(rest, ds, parts)
       }
     }
   }
@@ -683,23 +851,25 @@ fn consume_iso_naive(
 
 fn consume_zone(
   bytes: BitArray,
+  ds: List(Directive),
   parts: Parts,
 ) -> Result(#(Parts, BitArray), Nil) {
   case internal.parse_optional_zone(bytes) {
     Error(Nil) -> Error(Nil)
-    Ok(#(None, rest)) -> Ok(#(parts, rest))
+    Ok(#(None, rest)) -> run(rest, ds, parts)
     Ok(#(Some(#(critical, name)), rest)) ->
-      Ok(#(Parts(..parts, zone: Some(Zone(critical:, name:))), rest))
+      run(rest, ds, Parts(..parts, zone: Some(Zone(critical:, name:))))
   }
 }
 
 fn consume_tags(
   bytes: BitArray,
+  ds: List(Directive),
   parts: Parts,
 ) -> Result(#(Parts, BitArray), Nil) {
   case internal.parse_tag_run(bytes) {
     Error(Nil) -> Error(Nil)
-    Ok(#(raw, rest)) -> Ok(#(Parts(..parts, tags: wrap_tags(raw)), rest))
+    Ok(#(raw, rest)) -> run(rest, ds, Parts(..parts, tags: wrap_tags(raw)))
   }
 }
 

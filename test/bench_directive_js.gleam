@@ -109,6 +109,63 @@ pub fn main() {
   report("osler.parse_timestamp (Timestamp only)", osler.parse_timestamp)
   report("timestamp.parse_rfc3339 (gleam_time)", timestamp.parse_rfc3339)
   report("Date.parse (JS builtin)", date_parse)
+  io.println("")
+  report_slow("parse_any: prose w/ date+time+offset", fn(_) {
+    Ok(osler.parse_any("Meeting on 2024/06/22 at 1:42 PM in -04:00"))
+  })
+  report_slow("parse_any: ISO timestamp", fn(_) {
+    Ok(osler.parse_any("2024-06-13T13:42:11.314+10:00"))
+  })
+  report_slow("parse_any: bare date", fn(_) {
+    Ok(osler.parse_any("2024/06/22"))
+  })
+  report_slow("parse_any: no match (worst case)", fn(_) {
+    Ok(osler.parse_any("just some words with nothing in them at all"))
+  })
+}
+
+// `parse_any` is orders of magnitude slower than the fixed parsers, so it gets
+// its own far smaller iteration count -- at the shared 500k it would run for
+// tens of minutes.
+@target(javascript)
+const slow_iterations = 20_000
+
+@target(javascript)
+fn report_slow(label: String, parse: fn(String) -> Result(a, b)) -> Nil {
+  let _ = run(slow_iterations, parse, 0)
+  let samples = sample_n(slow_iterations, rounds, parse, [])
+  let sorted = list.sort(samples, float.compare)
+  io.println(
+    string.pad_end(label, 52, " ")
+    <> col(min(sorted))
+    <> col(median(sorted))
+    <> col(max(sorted)),
+  )
+}
+
+@target(javascript)
+fn sample_n(
+  iters: Int,
+  round: Int,
+  parse: fn(String) -> Result(a, b),
+  acc: List(Float),
+) -> List(Float) {
+  case round {
+    0 -> acc
+    _ -> {
+      let start = now()
+      let oks = run(iters, parse, 0)
+      let elapsed = now() -. start
+      case oks < 0 {
+        True -> io.println("unreachable")
+        False -> Nil
+      }
+      sample_n(iters, round - 1, parse, [
+        elapsed *. 1_000_000.0 /. int.to_float(iters),
+        ..acc
+      ])
+    }
+  }
 }
 
 @target(javascript)

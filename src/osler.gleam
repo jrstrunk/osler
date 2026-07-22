@@ -441,6 +441,7 @@ fn is_valid_time(hour: Int, minute: Int, second: Int) -> Bool {
 /// osler.parse_any("just some words")
 /// // -> #(None, None, None)
 /// ```
+@external(javascript, "./osler_ffi.mjs", "parse_any")
 pub fn parse_any(
   str: String,
 ) -> #(Option(calendar.Date), Option(calendar.TimeOfDay), Option(Duration)) {
@@ -452,10 +453,10 @@ pub fn parse_any(
 }
 
 fn extract_date(bits: BitArray) -> #(Option(calendar.Date), BitArray) {
-  case scan(bits, byte_boundary, 0, try_numeric_date) {
+  case scan(bits, byte_boundary, 0, class_numeric_date, try_numeric_date) {
     Ok(#(date, start, end)) -> #(Some(date), blank(bits, start, end))
     Error(Nil) ->
-      case scan(bits, byte_boundary, 0, try_named_date) {
+      case scan(bits, byte_boundary, 0, class_named_date, try_named_date) {
         Ok(#(date, start, end)) -> #(Some(date), blank(bits, start, end))
         Error(Nil) -> #(None, bits)
       }
@@ -463,13 +464,13 @@ fn extract_date(bits: BitArray) -> #(Option(calendar.Date), BitArray) {
 }
 
 fn extract_offset(bits: BitArray) -> #(Option(Duration), BitArray) {
-  case scan(bits, byte_boundary, 0, try_numeric_offset) {
+  case scan(bits, byte_boundary, 0, class_offset, try_numeric_offset) {
     Ok(#(minutes, start, end)) -> #(
       Some(duration.minutes(minutes)),
       blank(bits, start, end),
     )
     Error(Nil) ->
-      case scan(bits, byte_boundary, 0, try_zulu) {
+      case scan(bits, byte_boundary, 0, class_zulu, try_zulu) {
         Ok(#(minutes, start, end)) -> #(
           Some(duration.minutes(minutes)),
           blank(bits, start, end),
@@ -480,7 +481,7 @@ fn extract_offset(bits: BitArray) -> #(Option(Duration), BitArray) {
 }
 
 fn extract_time(bits: BitArray) -> Option(calendar.TimeOfDay) {
-  case scan(bits, byte_boundary, 0, try_time) {
+  case scan(bits, byte_boundary, 0, class_time, try_time) {
     Ok(#(time, _start, _end)) -> Some(time)
     Error(Nil) -> None
   }
@@ -490,22 +491,71 @@ fn extract_time(bits: BitArray) -> Option(calendar.TimeOfDay) {
 // a scan, so a component anchored to the string start is treated as bounded.
 const byte_boundary = 0x20
 
-// Walks the input left-to-right, calling `attempt` at each byte position with
-// the preceding byte (for word-boundary checks). Returns the first match with
-// its [start, end) byte span, or Error if none.
+// Each attempt has a cheap necessary condition on the byte at the cursor (and
+// on the one before it). Checking that inline in the loop is the difference
+// between walking a string and parsing at every offset of it: `attempt` is a
+// function *value*, so calling it hands `bits` across a boundary, which on
+// BEAM materialises a sub-binary and on JS allocates a whole `BitArray`
+// wrapper. Doing that at all N positions of all five scans cost ~700-900ns per
+// byte; a 42-character string with no date in it took 39us on BEAM and 327us
+// on JS. The guard below is only ever a comparison or two, so text that cannot
+// start a component is now skipped without any of that.
+//
+// The conditions must stay *necessary* -- never reject a position the attempt
+// would have accepted:
+//
+//   0 numeric date  digit at cursor (needs 4), previous byte not a digit
+//   1 named date    alpha or digit (a month name or a numeric month),
+//                   previous byte neither alpha nor digit
+//   2 offset        `+` or `-` (no constraint on the previous byte: an offset
+//                   legitimately abuts the time, `00:00:00+05:00`)
+//   3 zulu          `Z`/`z`, previous byte not alpha (so `Zulu` is skipped)
+//   4 time          digit at cursor, previous byte not a digit
+//
+// The class is a literal `Int` rather than a second closure, and it is matched
+// with literal patterns: a bare constant name in a Gleam pattern binds a fresh
+// variable instead of matching the constant's value.
+const class_numeric_date = 0
+
+const class_named_date = 1
+
+const class_offset = 2
+
+const class_zulu = 3
+
+const class_time = 4
+
+// Walks the input left-to-right, calling `attempt` at each *plausible* byte
+// position with the preceding byte (for word-boundary checks). Returns the
+// first match with its [start, end) byte span, or Error if none. Every attempt
+// needs at least one byte, so running off the end simply fails.
 fn scan(
   bits: BitArray,
   prev: Int,
   pos: Int,
+  class: Int,
   attempt: fn(BitArray, Int) -> Result(#(a, Int), Nil),
 ) -> Result(#(a, Int, Int), Nil) {
-  case attempt(bits, prev) {
-    Ok(#(value, consumed)) -> Ok(#(value, pos, pos + consumed))
-    Error(Nil) ->
-      case bits {
-        <<b, rest:bytes>> -> scan(rest, b, pos + 1, attempt)
-        _ -> Error(Nil)
+  case bits {
+    <<b, rest:bytes>> ->
+      case candidate(class, b, prev) {
+        False -> scan(rest, b, pos + 1, class, attempt)
+        True ->
+          case attempt(bits, prev) {
+            Ok(#(value, consumed)) -> Ok(#(value, pos, pos + consumed))
+            Error(Nil) -> scan(rest, b, pos + 1, class, attempt)
+          }
       }
+    _ -> Error(Nil)
+  }
+}
+
+fn candidate(class: Int, b: Int, prev: Int) -> Bool {
+  case class {
+    0 | 4 -> is_digit(b) && !is_digit(prev)
+    1 -> { is_alpha(b) || is_digit(b) } && !{ is_digit(prev) || is_alpha(prev) }
+    2 -> b == 0x2B || b == 0x2D
+    _ -> { b == 0x5A || b == 0x7A } && !is_alpha(prev)
   }
 }
 
@@ -601,40 +651,56 @@ fn read_month_token(bits: BitArray) -> Result(#(Int, BitArray), Nil) {
   }
 }
 
-// Tries the long names before the short ones so `Jan` does not shadow
-// `January`. Names are matched case-insensitively.
+// Month names, grouped by first letter and ordered long-before-short within a
+// group so `Jan` cannot shadow `January`.
+//
+// The flat 12-long + 12-short search this replaces ran at *every word start*
+// of every `try_named_date` scan -- the prefilter in `scan` lets a word start
+// through by design, since that is exactly where a month name would be. On a
+// 42-character sentence with no date in it that was ~216 case-insensitive
+// prefix comparisons; dispatching on the first byte first makes it ~20.
+//
+// Grouping is safe because names in different groups start with different
+// letters, so no cross-group shadowing is possible, and `may` is identical in
+// both the long and short tables.
+const months_j = [
+  #("january", 1),
+  #("june", 6),
+  #("july", 7),
+  #("jan", 1),
+  #("jun", 6),
+  #("jul", 7),
+]
+
+const months_f = [#("february", 2), #("feb", 2)]
+
+const months_m = [#("march", 3), #("may", 5), #("mar", 3)]
+
+const months_a = [#("april", 4), #("august", 8), #("apr", 4), #("aug", 8)]
+
+const months_s = [#("september", 9), #("sep", 9)]
+
+const months_o = [#("october", 10), #("oct", 10)]
+
+const months_n = [#("november", 11), #("nov", 11)]
+
+const months_d = [#("december", 12), #("dec", 12)]
+
 fn read_month_name(bits: BitArray) -> Result(#(Int, BitArray), Nil) {
-  let long = [
-    #("january", 1),
-    #("february", 2),
-    #("march", 3),
-    #("april", 4),
-    #("may", 5),
-    #("june", 6),
-    #("july", 7),
-    #("august", 8),
-    #("september", 9),
-    #("october", 10),
-    #("november", 11),
-    #("december", 12),
-  ]
-  let short = [
-    #("jan", 1),
-    #("feb", 2),
-    #("mar", 3),
-    #("apr", 4),
-    #("may", 5),
-    #("jun", 6),
-    #("jul", 7),
-    #("aug", 8),
-    #("sep", 9),
-    #("oct", 10),
-    #("nov", 11),
-    #("dec", 12),
-  ]
-  case match_first(bits, long) {
-    Ok(found) -> Ok(found)
-    Error(Nil) -> match_first(bits, short)
+  case bits {
+    <<c, _:bytes>> ->
+      case to_lower(c) {
+        0x6A -> match_first(bits, months_j)
+        0x66 -> match_first(bits, months_f)
+        0x6D -> match_first(bits, months_m)
+        0x61 -> match_first(bits, months_a)
+        0x73 -> match_first(bits, months_s)
+        0x6F -> match_first(bits, months_o)
+        0x6E -> match_first(bits, months_n)
+        0x64 -> match_first(bits, months_d)
+        _ -> Error(Nil)
+      }
+    _ -> Error(Nil)
   }
 }
 

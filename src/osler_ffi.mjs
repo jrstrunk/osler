@@ -15,9 +15,57 @@
 // returning `[value, nextIndex]` tuples -- that avoids allocating a small
 // array on every single digit group parsed. Only the final successful
 // Result payload gets allocated.
-import { Ok, Error, toList } from "./gleam.mjs";
+import { Ok, Error, toList, NonEmpty } from "./gleam.mjs";
 import { Some, None } from "../gleam_stdlib/gleam/option.mjs";
-import { Ixdtf, Zone, Tag, Parts, Am, Pm } from "./osler/parser.mjs";
+import {
+  Date as CalendarDate,
+  TimeOfDay,
+  January, February, March, April, May, June,
+  July, August, September, October, November, December,
+} from "../gleam_time/gleam/time/calendar.mjs";
+import {
+  Ixdtf, Zone, Tag, Parts, Am, Pm,
+  Year4,
+  Month,
+  Month2,
+  MonthShortName,
+  MonthLongName,
+  Day,
+  Day2,
+  WeekdayNumber,
+  WeekdayShortName2,
+  WeekdayShortName,
+  WeekdayLongName,
+  Hour24,
+  Hour24Padded,
+  Hour12,
+  Hour12Padded,
+  MeridiemLower,
+  MeridiemUpper,
+  Minute,
+  Minute2,
+  Second,
+  Second2,
+  Milli,
+  Micro,
+  Nano,
+  Offset,
+  OffsetZulu,
+  OffsetColon,
+  OffsetNoColon,
+  IsoOffset,
+  Gmt,
+  ZoneName,
+  ExtensionTags,
+  Literal,
+  Separator,
+  TimeSeparator,
+  DateTimeSeparator,
+  EndOfInput,
+  IsoDate,
+  IsoTime,
+  IsoNaiveDateTime,
+} from "./osler/parser.mjs";
 import { from_unix_seconds_and_nanoseconds } from "../gleam_time/gleam/time/timestamp.mjs";
 import { minutes as duration_minutes } from "../gleam_time/gleam/time/duration.mjs";
 
@@ -992,182 +1040,284 @@ function isTimeSep(c) {
   return c === CHAR_COLON || c === CHAR_UNDERSCORE || c === CHAR_SPACE;
 }
 
+
+// --- directive dispatch ------------------------------------------------------
+//
+// `stepParse` used to switch on `d.constructor.name`. That cost ~530ns of a
+// 3000ns 14-directive parse, for two reasons: `Function.prototype.name` is a
+// lazy accessor in V8 rather than a plain slot, and a 35-case string switch is
+// a chain of comparisons whose late entries (`Literal`, `IsoDate`) are exactly
+// the ones a real format list uses most. Mapping the constructor *object* to a
+// dense small integer once, then switching on that, gives V8 a jump table and
+// never touches `.name`.
+// Built lazily, not at module load: `osler/parser.mjs` imports this module
+// for its `@external`s, so the directive classes are still in their temporal
+// dead zone while this module's top level runs. One null check per directive
+// is a perfectly predicted branch.
+let D_TAGS = null;
+
+function buildDTags() {
+  D_TAGS = new Map([
+  [Year4, 0],
+  [Month, 1],
+  [Month2, 2],
+  [MonthShortName, 3],
+  [MonthLongName, 4],
+  [Day, 5],
+  [Day2, 6],
+  [WeekdayNumber, 7],
+  [WeekdayShortName2, 8],
+  [WeekdayShortName, 9],
+  [WeekdayLongName, 10],
+  [Hour24, 11],
+  [Hour24Padded, 12],
+  [Hour12, 13],
+  [Hour12Padded, 14],
+  [MeridiemLower, 15],
+  [MeridiemUpper, 16],
+  [Minute, 17],
+  [Minute2, 18],
+  [Second, 19],
+  [Second2, 20],
+  [Milli, 21],
+  [Micro, 22],
+  [Nano, 23],
+  [Offset, 24],
+  [OffsetZulu, 25],
+  [OffsetColon, 26],
+  [OffsetNoColon, 27],
+  [IsoOffset, 28],
+  [Gmt, 29],
+  [ZoneName, 30],
+  [ExtensionTags, 31],
+  [Literal, 32],
+  [Separator, 33],
+  [TimeSeparator, 34],
+  [DateTimeSeparator, 35],
+  [EndOfInput, 36],
+  [IsoDate, 37],
+  [IsoTime, 38],
+  [IsoNaiveDateTime, 39],
+  ]);
+}
+
+const D_YEAR4 = 0;
+const D_MONTH = 1;
+const D_MONTH2 = 2;
+const D_MONTHSHORTNAME = 3;
+const D_MONTHLONGNAME = 4;
+const D_DAY = 5;
+const D_DAY2 = 6;
+const D_WEEKDAYNUMBER = 7;
+const D_WEEKDAYSHORTNAME2 = 8;
+const D_WEEKDAYSHORTNAME = 9;
+const D_WEEKDAYLONGNAME = 10;
+const D_HOUR24 = 11;
+const D_HOUR24PADDED = 12;
+const D_HOUR12 = 13;
+const D_HOUR12PADDED = 14;
+const D_MERIDIEMLOWER = 15;
+const D_MERIDIEMUPPER = 16;
+const D_MINUTE = 17;
+const D_MINUTE2 = 18;
+const D_SECOND = 19;
+const D_SECOND2 = 20;
+const D_MILLI = 21;
+const D_MICRO = 22;
+const D_NANO = 23;
+const D_OFFSET = 24;
+const D_OFFSETZULU = 25;
+const D_OFFSETCOLON = 26;
+const D_OFFSETNOCOLON = 27;
+const D_ISOOFFSET = 28;
+const D_GMT = 29;
+const D_ZONENAME = 30;
+const D_EXTENSIONTAGS = 31;
+const D_LITERAL = 32;
+const D_SEPARATOR = 33;
+const D_TIMESEPARATOR = 34;
+const D_DATETIMESEPARATOR = 35;
+const D_ENDOFINPUT = 36;
+const D_ISODATE = 37;
+const D_ISOTIME = 38;
+const D_ISONAIVEDATETIME = 39;
 // One parse directive. Mutates state.i and the `p` scratch object; returns
 // false on failure.
 function stepParse(d, str, state, p) {
-  switch (d.constructor.name) {
-    case "Year4": {
+  if (D_TAGS === null) buildDTags();
+  switch (D_TAGS.get(d.constructor)) {
+    case D_YEAR4: {
       const v = parseN(str, state, 4);
       if (v === undefined) return false;
       p.year = v;
       return true;
     }
-    case "Month": {
+    case D_MONTH: {
       const v = parse1or2(str, state);
       if (v === undefined) return false;
       p.month = v;
       return true;
     }
-    case "Month2": {
+    case D_MONTH2: {
       const v = parse2(str, state);
       if (v === undefined) return false;
       p.month = v;
       return true;
     }
-    case "MonthShortName": {
+    case D_MONTHSHORTNAME: {
       const k = matchName(str, state, MONTHS_SHORT);
       if (k < 0) return false;
       p.month = k + 1;
       return true;
     }
-    case "MonthLongName": {
+    case D_MONTHLONGNAME: {
       const k = matchName(str, state, MONTHS_LONG);
       if (k < 0) return false;
       p.month = k + 1;
       return true;
     }
-    case "Day": {
+    case D_DAY: {
       const v = parse1or2(str, state);
       if (v === undefined) return false;
       p.day = v;
       return true;
     }
-    case "Day2": {
+    case D_DAY2: {
       const v = parse2(str, state);
       if (v === undefined) return false;
       p.day = v;
       return true;
     }
-    case "WeekdayNumber": {
+    case D_WEEKDAYNUMBER: {
       const c = str.charCodeAt(state.i);
       if (c < CHAR_0 || c > CHAR_0 + 6) return false;
       state.i += 1;
       return true;
     }
-    case "WeekdayShortName2":
+    case D_WEEKDAYSHORTNAME2:
       return matchName(str, state, WEEKDAY_2) >= 0;
-    case "WeekdayShortName":
+    case D_WEEKDAYSHORTNAME:
       return matchName(str, state, WEEKDAY_3) >= 0;
-    case "WeekdayLongName":
+    case D_WEEKDAYLONGNAME:
       return matchName(str, state, WEEKDAY_LONG) >= 0;
-    case "Hour24": {
+    case D_HOUR24: {
       const v = parse1or2(str, state);
       if (v === undefined) return false;
       p.hour = v;
       return true;
     }
-    case "Hour24Padded": {
+    case D_HOUR24PADDED: {
       const v = parse2(str, state);
       if (v === undefined) return false;
       p.hour = v;
       return true;
     }
-    case "Hour12": {
+    case D_HOUR12: {
       const v = parse1or2(str, state);
       if (v === undefined) return false;
       p.twelveHour = v;
       return true;
     }
-    case "Hour12Padded": {
+    case D_HOUR12PADDED: {
       const v = parse2(str, state);
       if (v === undefined) return false;
       p.twelveHour = v;
       return true;
     }
-    case "MeridiemLower": {
+    case D_MERIDIEMLOWER: {
       if (str.startsWith("am", state.i)) { state.i += 2; p.period = Am; return true; }
       if (str.startsWith("pm", state.i)) { state.i += 2; p.period = Pm; return true; }
       return false;
     }
-    case "MeridiemUpper": {
+    case D_MERIDIEMUPPER: {
       if (str.startsWith("AM", state.i)) { state.i += 2; p.period = Am; return true; }
       if (str.startsWith("PM", state.i)) { state.i += 2; p.period = Pm; return true; }
       return false;
     }
-    case "Minute": {
+    case D_MINUTE: {
       const v = parse1or2(str, state);
       if (v === undefined) return false;
       p.minute = v;
       return true;
     }
-    case "Minute2": {
+    case D_MINUTE2: {
       const v = parse2(str, state);
       if (v === undefined) return false;
       p.minute = v;
       return true;
     }
-    case "Second": {
+    case D_SECOND: {
       const v = parse1or2(str, state);
       if (v === undefined) return false;
       p.second = v;
       return true;
     }
-    case "Second2": {
+    case D_SECOND2: {
       const v = parse2(str, state);
       if (v === undefined) return false;
       p.second = v;
       return true;
     }
-    case "Milli": {
+    case D_MILLI: {
       const v = parseN(str, state, 3);
       if (v === undefined) return false;
       p.nanosecond = v * 1000000;
       return true;
     }
-    case "Micro": {
+    case D_MICRO: {
       const v = parseN(str, state, 6);
       if (v === undefined) return false;
       p.nanosecond = v * 1000;
       return true;
     }
-    case "Nano": {
+    case D_NANO: {
       const v = parseN(str, state, 9);
       if (v === undefined) return false;
       p.nanosecond = v;
       return true;
     }
-    case "Offset":
-    case "OffsetZulu":
-    case "OffsetColon":
-    case "OffsetNoColon":
-    case "IsoOffset": {
+    case D_OFFSET:
+    case D_OFFSETZULU:
+    case D_OFFSETCOLON:
+    case D_OFFSETNOCOLON:
+    case D_ISOOFFSET: {
       if (!parseOffset(str, state)) return false;
       p.offsetMinutes = state.offsetMinutes;
       return true;
     }
-    case "Gmt": {
+    case D_GMT: {
       if (!str.startsWith("GMT", state.i)) return false;
       state.i += 3;
       p.offsetMinutes = 0;
       return true;
     }
-    case "ZoneName": {
+    case D_ZONENAME: {
       const res = parseOptionalZone(str, state);
       if (res === null) return false;
       if (res.zone !== undefined) p.zone = res.zone;
       return true;
     }
-    case "ExtensionTags": {
+    case D_EXTENSIONTAGS: {
       const tags = parseTagRun(str, state);
       if (tags === null) return false;
       p.tags = tags;
       return true;
     }
-    case "Literal": {
+    case D_LITERAL: {
       const lit = d[0];
       if (!str.startsWith(lit, state.i)) return false;
       state.i += lit.length;
       return true;
     }
-    case "Separator": {
+    case D_SEPARATOR: {
       if (isDateSep(str.charCodeAt(state.i))) state.i += 1;
       return true;
     }
-    case "TimeSeparator": {
+    case D_TIMESEPARATOR: {
       if (isTimeSep(str.charCodeAt(state.i))) state.i += 1;
       return true;
     }
-    case "DateTimeSeparator": {
+    case D_DATETIMESEPARATOR: {
       const c = str.charCodeAt(state.i);
       if (
         c === CHAR_T_UPPER || c === CHAR_T_LOWER ||
@@ -1178,16 +1328,16 @@ function stepParse(d, str, state, p) {
       }
       return false;
     }
-    case "EndOfInput":
+    case D_ENDOFINPUT:
       return state.i === str.length;
-    case "IsoDate": {
+    case D_ISODATE: {
       if (!parseDate(str, state)) return false;
       p.year = state.year;
       p.month = state.month;
       p.day = state.day;
       return true;
     }
-    case "IsoTime": {
+    case D_ISOTIME: {
       if (!parseTime(str, state)) return false;
       p.hour = state.hour;
       p.minute = state.minute;
@@ -1195,7 +1345,7 @@ function stepParse(d, str, state, p) {
       p.nanosecond = state.nanosecond;
       return true;
     }
-    case "IsoNaiveDateTime": {
+    case D_ISONAIVEDATETIME: {
       if (!parseDate(str, state)) return false;
       p.year = state.year;
       p.month = state.month;
@@ -1216,32 +1366,74 @@ function stepParse(d, str, state, p) {
   }
 }
 
+// `SHARED_NONE`, not `new None()`: an absent field is the common case in a
+// real format list (a date-only format leaves eight of the twelve empty), and
+// `None` carries no payload, so a fresh one per absent field was pure garbage.
+// Same reasoning as the `parse_ixdtf` path, which has used the singleton all
+// along -- this function simply never got the treatment.
 function optOf(v) {
-  return v === undefined ? new None() : new Some(v);
+  return v === undefined ? SHARED_NONE : new Some(v);
+}
+
+// Interned `Some` for small non-negative integers.
+//
+// `new Some(v)` measured ~155ns -- twenty times a 12-field `new Parts(...)` at
+// 8ns. The reason is the representation: Gleam gives positional variant fields
+// integer keys (`this[0] = x`), and an integer-keyed property lands in V8's
+// *elements* backing store, so every `Some` allocates a JSObject **and** a
+// FixedArray and takes the indexed-store slow path. Named fields, as `Parts`
+// has, are in-object slots. Eight `Some`s were 1586ns of a 2267ns parse -- far
+// more than the scanning.
+//
+// They can safely be shared: a Gleam `Option` is immutable, `==` on it is
+// structural (`isEqual`), and no identity comparison is exposed, which is the
+// same argument that already justifies `SHARED_NONE`. The table is filled
+// lazily, so a program pays only for the values it actually parses.
+//
+// 4096 covers every time field (month, day, hour, minute, second), positive
+// offsets, and the years anyone is realistically parsing. Anything else falls
+// through to a fresh `Some`, which is merely the old behaviour.
+const SOME_INT_MAX = 4096;
+const SOME_INT = new Array(SOME_INT_MAX);
+
+function someInt(v) {
+  if (v >= 0 && v < SOME_INT_MAX) {
+    const hit = SOME_INT[v];
+    if (hit !== undefined) return hit;
+    return (SOME_INT[v] = new Some(v));
+  }
+  return new Some(v);
+}
+
+function optInt(v) {
+  return v === undefined ? SHARED_NONE : someInt(v);
 }
 
 export function parse(input, directives) {
   const state = { i: 0 };
   const p = {};
-  for (const d of directives) {
-    if (!stepParse(d, input, state, p)) return new Error(undefined);
+  // Walk the Gleam list by `head`/`tail` rather than `for...of`. The list's
+  // `Symbol.iterator` allocates a `ListIterator` plus a `{value, done}` object
+  // per element -- 15 objects to walk 14 directives, ~136ns of a 3000ns parse.
+  for (let c = directives; c instanceof NonEmpty; c = c.tail) {
+    if (!stepParse(c.head, input, state, p)) return FALLBACK;
   }
   const period =
-    p.period === undefined ? new None() : new Some(new p.period());
+    p.period === undefined ? SHARED_NONE : new Some(new p.period());
   return new Ok(
     new Parts(
-      optOf(p.year),
-      optOf(p.month),
-      optOf(p.day),
-      optOf(p.hour),
-      optOf(p.twelveHour),
+      optInt(p.year),
+      optInt(p.month),
+      optInt(p.day),
+      optInt(p.hour),
+      optInt(p.twelveHour),
       period,
-      optOf(p.minute),
-      optOf(p.second),
-      optOf(p.nanosecond),
-      optOf(p.offsetMinutes),
-      p.zone === undefined ? new None() : new Some(p.zone),
-      p.tags === undefined ? toList([]) : toList(p.tags),
+      optInt(p.minute),
+      optInt(p.second),
+      optInt(p.nanosecond),
+      optInt(p.offsetMinutes),
+      p.zone === undefined ? SHARED_NONE : new Some(p.zone),
+      p.tags === undefined ? EMPTY_TAGS : toList(p.tags),
     ),
   );
 }
@@ -1401,4 +1593,502 @@ export function format(parts, directives) {
     out += chunk;
   }
   return new Ok(out);
+}
+
+// --- parse_any ---------------------------------------------------------------
+//
+// A charCodeAt mirror of `osler.parse_any`. The Gleam version consumes its
+// `BitArray` one byte at a time, and on JS every `<<b, rest:bytes>>` calls
+// `bitArraySlice`, which allocates a `Uint8Array` view *and* a `BitArray`
+// wrapper -- two heavyweight allocations per byte position, across five
+// scanning passes. That was the whole reason `parse_any` ran ~10x slower here
+// than on BEAM. This version never slices: it walks indices into the string
+// and reads code units, so a rejected position costs a comparison.
+//
+// Everything below mirrors the Gleam function-for-function, and the two are
+// checked against each other over 2244 inputs by `test/differential.gleam`.
+// Keep them in step: this is a heuristic, so a divergence shows up as a
+// *different guess*, not as an error.
+//
+// One deliberate difference: the Gleam counts UTF-8 bytes and this counts
+// UTF-16 code units, so the two disagree about *indices* on non-ASCII input.
+// They still agree about results, because every byte of a non-ASCII UTF-8
+// sequence and every unit of a non-ASCII UTF-16 sequence is outside the ASCII
+// ranges these scanners test, so both treat such text as an opaque
+// non-alphanumeric run. The corpus includes non-ASCII cases to hold that to
+// account rather than trust it.
+
+// Scan classes, mirroring `candidate/3`. Each is a *necessary* condition on
+// the byte at the cursor and the one before it.
+const A_NUMERIC_DATE = 0;
+const A_NAMED_DATE = 1;
+const A_OFFSET = 2;
+const A_ZULU = 3;
+const A_TIME = 4;
+
+const CHAR_COMMA = 0x2c;
+const CHAR_TAB = 0x09;
+
+// A non-digit, non-alpha byte, seeding `prev` so a component anchored to the
+// string start counts as bounded.
+const A_BOUNDARY = 0x20;
+
+function aIsDateSep(c) {
+  return (
+    c === CHAR_MINUS ||
+    c === CHAR_SLASH ||
+    c === CHAR_DOT ||
+    c === CHAR_UNDERSCORE ||
+    c === CHAR_SPACE ||
+    c === CHAR_COMMA
+  );
+}
+
+function aToLower(c) {
+  return c >= CHAR_A_UPPER && c <= CHAR_Z_UPPER ? c + 32 : c;
+}
+
+// `charCodeAt` past the end is NaN, and every comparison against NaN is false,
+// which is exactly the "no more bytes" answer the Gleam gives.
+function aNotDigitHead(str, i) {
+  return !isDigit(str.charCodeAt(i));
+}
+
+function aNotAlphaHead(str, i) {
+  return !isAlpha(str.charCodeAt(i));
+}
+
+function aDropOneSep(str, i) {
+  return aIsDateSep(str.charCodeAt(i)) ? i + 1 : i;
+}
+
+// Up to two leading separators, as `drop_seps`.
+function aDropSeps(str, i) {
+  return aDropOneSep(str, aDropOneSep(str, i));
+}
+
+function aSkipSpaces(str, i) {
+  let c = str.charCodeAt(i);
+  while (c === CHAR_SPACE || c === CHAR_TAB) {
+    i += 1;
+    c = str.charCodeAt(i);
+  }
+  return i;
+}
+
+// Case-insensitive literal match of a lowercase ASCII `pattern`. Returns the
+// index after it, or -1.
+function aCiPrefix(str, i, pattern) {
+  for (let k = 0; k < pattern.length; k += 1) {
+    if (aToLower(str.charCodeAt(i + k)) !== pattern.charCodeAt(k)) return -1;
+  }
+  return i + pattern.length;
+}
+
+function aDropOrdinal(str, i) {
+  let j = aCiPrefix(str, i, "st");
+  if (j >= 0) return j;
+  j = aCiPrefix(str, i, "nd");
+  if (j >= 0) return j;
+  j = aCiPrefix(str, i, "rd");
+  if (j >= 0) return j;
+  j = aCiPrefix(str, i, "th");
+  return j >= 0 ? j : i;
+}
+
+// Fixed-width digit reads. `A_END` carries the index after the match, so these
+// return a plain number and allocate nothing.
+let A_END = 0;
+
+function aDigits(str, i, n) {
+  let acc = 0;
+  for (let k = 0; k < n; k += 1) {
+    const c = str.charCodeAt(i + k);
+    if (!isDigit(c)) return -1;
+    acc = acc * 10 + (c - CHAR_0);
+  }
+  A_END = i + n;
+  return acc;
+}
+
+function aDigits1or2(str, i) {
+  const c1 = str.charCodeAt(i);
+  if (!isDigit(c1)) return -1;
+  const c2 = str.charCodeAt(i + 1);
+  if (isDigit(c2)) {
+    A_END = i + 2;
+    return (c1 - CHAR_0) * 10 + (c2 - CHAR_0);
+  }
+  A_END = i + 1;
+  return c1 - CHAR_0;
+}
+
+// --- month names, grouped by first letter, long before short ----------------
+
+const A_MONTHS_J = [["january", 1], ["june", 6], ["july", 7], ["jan", 1],
+  ["jun", 6], ["jul", 7]];
+const A_MONTHS_F = [["february", 2], ["feb", 2]];
+const A_MONTHS_M = [["march", 3], ["may", 5], ["mar", 3]];
+const A_MONTHS_A = [["april", 4], ["august", 8], ["apr", 4], ["aug", 8]];
+const A_MONTHS_S = [["september", 9], ["sep", 9]];
+const A_MONTHS_O = [["october", 10], ["oct", 10]];
+const A_MONTHS_N = [["november", 11], ["nov", 11]];
+const A_MONTHS_D = [["december", 12], ["dec", 12]];
+
+function aMatchFirst(str, i, table) {
+  for (let k = 0; k < table.length; k += 1) {
+    const j = aCiPrefix(str, i, table[k][0]);
+    if (j >= 0) {
+      A_END = j;
+      return table[k][1];
+    }
+  }
+  return -1;
+}
+
+function aReadMonthName(str, i) {
+  switch (aToLower(str.charCodeAt(i))) {
+    case 0x6a: return aMatchFirst(str, i, A_MONTHS_J);
+    case 0x66: return aMatchFirst(str, i, A_MONTHS_F);
+    case 0x6d: return aMatchFirst(str, i, A_MONTHS_M);
+    case 0x61: return aMatchFirst(str, i, A_MONTHS_A);
+    case 0x73: return aMatchFirst(str, i, A_MONTHS_S);
+    case 0x6f: return aMatchFirst(str, i, A_MONTHS_O);
+    case 0x6e: return aMatchFirst(str, i, A_MONTHS_N);
+    case 0x64: return aMatchFirst(str, i, A_MONTHS_D);
+    default: return -1;
+  }
+}
+
+function aReadMonthToken(str, i) {
+  const m = aReadMonthName(str, i);
+  return m >= 0 ? m : aDigits1or2(str, i);
+}
+
+// --- calendar validation ----------------------------------------------------
+
+function aIsLeapYear(y) {
+  return (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+}
+
+function aValidDate(year, month, day) {
+  switch (month) {
+    case 1: case 3: case 5: case 7: case 8: case 10: case 12:
+      return day >= 1 && day <= 31;
+    case 4: case 6: case 9: case 11:
+      return day >= 1 && day <= 30;
+    case 2:
+      return (day >= 1 && day <= 28) || (day === 29 && aIsLeapYear(year));
+    default:
+      return false;
+  }
+}
+
+function aIsValidTime(hour, minute, second) {
+  return (
+    (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 &&
+      second >= 0 && second <= 59) ||
+    (hour === 24 && minute === 0 && second === 0) ||
+    (hour === 23 && minute === 59 && second === 60)
+  );
+}
+
+// Built lazily for the same reason `D_TAGS` is: keeps module top-level free of
+// work and of ordering assumptions.
+let A_MONTH_VALUES = null;
+
+function aMonthValue(m) {
+  if (A_MONTH_VALUES === null) {
+    A_MONTH_VALUES = [
+      null, new January(), new February(), new March(), new April(),
+      new May(), new June(), new July(), new August(), new September(),
+      new October(), new November(), new December(),
+    ];
+  }
+  return A_MONTH_VALUES[m];
+}
+
+// --- the five attempts ------------------------------------------------------
+//
+// Each returns the number of code units consumed, or -1, and leaves its value
+// in `A_VALUE`. Mutable scratch rather than a returned pair: the scans run
+// strictly one after another, and the point of this module is not allocating.
+let A_VALUE = null;
+
+function aFinishDate(year, month, day, start, end) {
+  if (year < 1000 || year > 9999) return -1;
+  if (!aValidDate(year, month, day)) return -1;
+  A_VALUE = new CalendarDate(year, aMonthValue(month), day);
+  return end - start;
+}
+
+function aTryNumericDate(str, i, prev) {
+  if (isDigit(prev)) return -1;
+  const year = aDigits(str, i, 4);
+  if (year < 0) return -1;
+  let j = A_END;
+  if (aIsDateSep(str.charCodeAt(j))) {
+    j = aDropSeps(str, j);
+    const month = aDigits1or2(str, j);
+    if (month < 0) return -1;
+    j = aDropSeps(str, A_END);
+    const day = aDigits1or2(str, j);
+    if (day < 0) return -1;
+    return aFinishDate(year, month, day, i, A_END);
+  }
+  // Compact `YYYYMMDD`.
+  const month = aDigits(str, j, 2);
+  if (month < 0) return -1;
+  const day = aDigits(str, j + 2, 2);
+  if (day < 0) return -1;
+  const after = j + 4;
+  if (!aNotDigitHead(str, after)) return -1;
+  return aFinishDate(year, month, day, i, after);
+}
+
+function aTryNamedDate(str, i, prev) {
+  if (isDigit(prev) || isAlpha(prev)) return -1;
+  const month = aReadMonthToken(str, i);
+  if (month < 0) return -1;
+  let j = aDropSeps(str, A_END);
+  const day = aDigits1or2(str, j);
+  if (day < 0) return -1;
+  j = aDropSeps(str, aDropOrdinal(str, A_END));
+  const year = aDigits(str, j, 4);
+  if (year < 0) return -1;
+  j = A_END;
+  if (!aNotDigitHead(str, j)) return -1;
+  return aFinishDate(year, month, day, i, j);
+}
+
+function aTryNumericOffset(str, i) {
+  const sign = str.charCodeAt(i);
+  if (sign !== CHAR_PLUS && sign !== CHAR_MINUS) return -1;
+  const signum = sign === CHAR_MINUS ? -1 : 1;
+  const hour = aDigits(str, i + 1, 2);
+  if (hour < 0) return -1;
+  let j = A_END;
+  // `:MM`, a bare `MM`, or nothing.
+  let minute;
+  if (
+    str.charCodeAt(j) === CHAR_COLON &&
+    isDigit(str.charCodeAt(j + 1)) && isDigit(str.charCodeAt(j + 2))
+  ) {
+    minute = (str.charCodeAt(j + 1) - CHAR_0) * 10 +
+      (str.charCodeAt(j + 2) - CHAR_0);
+    j += 3;
+  } else if (isDigit(str.charCodeAt(j)) && isDigit(str.charCodeAt(j + 1))) {
+    minute = (str.charCodeAt(j) - CHAR_0) * 10 +
+      (str.charCodeAt(j + 1) - CHAR_0);
+    j += 2;
+  } else {
+    minute = 0;
+  }
+  if (!aNotDigitHead(str, j)) return -1;
+  const minutes = signum * (hour * 60 + minute);
+  if (minutes < -720 || minutes > 840) return -1;
+  A_VALUE = minutes;
+  return j - i;
+}
+
+function aTryZulu(str, i, prev) {
+  if (isAlpha(prev)) return -1;
+  const c = str.charCodeAt(i);
+  if (c !== CHAR_Z_UPPER && c !== CHAR_Z_LOWER) return -1;
+  if (!aNotAlphaHead(str, i + 1)) return -1;
+  A_VALUE = 0;
+  return 1;
+}
+
+// `HHMMSS`, or `HH:MM[:SS]`. `A_HOUR`/`A_MINUTE`/`A_SECOND` carry the fields.
+let A_HOUR = 0;
+let A_MINUTE = 0;
+let A_SECOND = 0;
+
+function aCompactHms(str, i) {
+  for (let k = 0; k < 6; k += 1) {
+    if (!isDigit(str.charCodeAt(i + k))) return -1;
+  }
+  if (!aNotDigitHead(str, i + 6)) return -1;
+  A_HOUR = (str.charCodeAt(i) - CHAR_0) * 10 + (str.charCodeAt(i + 1) - CHAR_0);
+  A_MINUTE = (str.charCodeAt(i + 2) - CHAR_0) * 10 +
+    (str.charCodeAt(i + 3) - CHAR_0);
+  A_SECOND = (str.charCodeAt(i + 4) - CHAR_0) * 10 +
+    (str.charCodeAt(i + 5) - CHAR_0);
+  return i + 6;
+}
+
+function aColonHms(str, i) {
+  const hour = aDigits1or2(str, i);
+  if (hour < 0) return -1;
+  let j = A_END;
+  if (str.charCodeAt(j) !== CHAR_COLON) return -1;
+  const minute = aDigits1or2(str, j + 1);
+  if (minute < 0) return -1;
+  j = A_END;
+  A_HOUR = hour;
+  A_MINUTE = minute;
+  // A second `:` may be followed by seconds -- or by nothing, in which case
+  // the Gleam leaves the cursor *at* the colon, not after it.
+  if (str.charCodeAt(j) === CHAR_COLON) {
+    const second = aDigits1or2(str, j + 1);
+    if (second >= 0) {
+      A_SECOND = second;
+      return A_END;
+    }
+  }
+  A_SECOND = 0;
+  return j;
+}
+
+function aReadHms(str, i) {
+  const j = aCompactHms(str, i);
+  return j >= 0 ? j : aColonHms(str, i);
+}
+
+// Optional `.` plus 1..9+ fraction digits, truncated to nanoseconds. -1 means
+// a `.` with no digits after it, which fails the whole time.
+function aFractionNs(str, i) {
+  if (str.charCodeAt(i) !== CHAR_DOT) {
+    A_VALUE = 0;
+    return i;
+  }
+  let j = i + 1;
+  let acc = 0;
+  let count = 0;
+  for (;;) {
+    const c = str.charCodeAt(j);
+    if (!isDigit(c)) break;
+    if (count < 9) {
+      acc = acc * 10 + (c - CHAR_0);
+      count += 1;
+    }
+    j += 1;
+  }
+  if (count === 0) return -1;
+  A_VALUE = acc * POW10[count];
+  return j;
+}
+
+function aMeridiemAm(str, i) {
+  const j = aCiPrefix(str, i, "am");
+  if (j >= 0) {
+    A_VALUE = 1;
+    return j;
+  }
+  const k = aCiPrefix(str, i, "pm");
+  if (k >= 0) {
+    A_VALUE = 0;
+    return k;
+  }
+  return -1;
+}
+
+function aAdjustTo24Hour(hour, am) {
+  if (am) return hour === 12 ? 0 : hour;
+  return hour === 12 ? 12 : hour + 12;
+}
+
+// Returns the index after a consumed meridiem, leaving the hour in `A_HOUR`.
+// On no match the cursor goes back to `i`, *before* any skipped whitespace.
+function aApplyMeridiem(hour, str, i) {
+  const afterWs = aSkipSpaces(str, i);
+  const j = aMeridiemAm(str, afterWs);
+  if (j < 0) {
+    A_HOUR = hour;
+    return i;
+  }
+  const am = A_VALUE === 1;
+  if (!aNotAlphaHead(str, j)) {
+    A_HOUR = hour;
+    return i;
+  }
+  A_HOUR = aAdjustTo24Hour(hour, am);
+  return j;
+}
+
+function aTryTime(str, i, prev) {
+  if (isDigit(prev)) return -1;
+  let j = aReadHms(str, i);
+  if (j < 0) return -1;
+  const hour = A_HOUR;
+  const minute = A_MINUTE;
+  const second = A_SECOND;
+  j = aFractionNs(str, j);
+  if (j < 0) return -1;
+  const nanosecond = A_VALUE;
+  j = aApplyMeridiem(hour, str, j);
+  if (!aIsValidTime(A_HOUR, minute, second)) return -1;
+  A_VALUE = new TimeOfDay(A_HOUR, minute, second, nanosecond);
+  return j - i;
+}
+
+// --- scanning ---------------------------------------------------------------
+
+function aCandidate(cls, b, prev) {
+  switch (cls) {
+    case A_NUMERIC_DATE:
+    case A_TIME:
+      return isDigit(b) && !isDigit(prev);
+    case A_NAMED_DATE:
+      return (isAlpha(b) || isDigit(b)) && !(isDigit(prev) || isAlpha(prev));
+    case A_OFFSET:
+      return b === CHAR_PLUS || b === CHAR_MINUS;
+    default:
+      return (b === CHAR_Z_UPPER || b === CHAR_Z_LOWER) && !isAlpha(prev);
+  }
+}
+
+// `A_START`/`A_END_SPAN` hold the matched span; the return says whether there
+// was one.
+let A_START = 0;
+let A_END_SPAN = 0;
+
+function aScan(str, cls, attempt) {
+  const len = str.length;
+  let prev = A_BOUNDARY;
+  for (let i = 0; i < len; i += 1) {
+    const b = str.charCodeAt(i);
+    if (aCandidate(cls, b, prev)) {
+      const consumed = attempt(str, i, prev);
+      if (consumed >= 0) {
+        A_START = i;
+        A_END_SPAN = i + consumed;
+        return true;
+      }
+    }
+    prev = b;
+  }
+  return false;
+}
+
+// Replaces the matched span with a single space, so it leaves a clean word
+// boundary and cannot be re-read by a later scan.
+function aBlank(str) {
+  return str.slice(0, A_START) + " " + str.slice(A_END_SPAN);
+}
+
+export function parse_any(str) {
+  let date = SHARED_NONE;
+  if (aScan(str, A_NUMERIC_DATE, aTryNumericDate)) {
+    date = new Some(A_VALUE);
+    str = aBlank(str);
+  } else if (aScan(str, A_NAMED_DATE, aTryNamedDate)) {
+    date = new Some(A_VALUE);
+    str = aBlank(str);
+  }
+
+  let offset = SHARED_NONE;
+  if (aScan(str, A_OFFSET, aTryNumericOffset)) {
+    offset = new Some(duration_minutes(A_VALUE));
+    str = aBlank(str);
+  } else if (aScan(str, A_ZULU, aTryZulu)) {
+    offset = new Some(duration_minutes(A_VALUE));
+    str = aBlank(str);
+  }
+
+  let time = SHARED_NONE;
+  if (aScan(str, A_TIME, aTryTime)) time = new Some(A_VALUE);
+
+  return [date, time, offset];
 }
