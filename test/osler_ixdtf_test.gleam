@@ -11,66 +11,43 @@ pub fn ixdtf_no_suffix_test() {
 
 pub fn ixdtf_named_zone_test() {
   assert parser.parse_ixdtf("1996-12-19T16:39:57-08:00[America/Los_Angeles]")
-    == Ok(Ixdtf(
-      1996,
-      12,
-      19,
-      16,
-      39,
-      57,
-      0,
-      -480,
-      Some(Zone(False, "America/Los_Angeles")),
-      [],
-    ))
+    == Ok(
+      Ixdtf(
+        1996,
+        12,
+        19,
+        16,
+        39,
+        57,
+        0,
+        -480,
+        Some(Zone(False, "America/Los_Angeles")),
+        [],
+      ),
+    )
 }
 
 pub fn ixdtf_critical_zone_and_tag_test() {
   assert parser.parse_ixdtf("2022-07-08T00:14:07Z[!Europe/Paris][u-ca=hebrew]")
-    == Ok(Ixdtf(
-      2022,
-      7,
-      8,
-      0,
-      14,
-      7,
-      0,
-      0,
-      Some(Zone(True, "Europe/Paris")),
-      [Tag(False, "u-ca", "hebrew")],
-    ))
+    == Ok(
+      Ixdtf(2022, 7, 8, 0, 14, 7, 0, 0, Some(Zone(True, "Europe/Paris")), [
+        Tag(False, "u-ca", "hebrew"),
+      ]),
+    )
 }
 
 pub fn ixdtf_offset_zone_test() {
   assert parser.parse_ixdtf("2022-07-08T00:14:07+08:45[+08:45]")
-    == Ok(Ixdtf(
-      2022,
-      7,
-      8,
-      0,
-      14,
-      7,
-      0,
-      525,
-      Some(Zone(False, "+08:45")),
-      [],
-    ))
+    == Ok(Ixdtf(2022, 7, 8, 0, 14, 7, 0, 525, Some(Zone(False, "+08:45")), []))
 }
 
 pub fn ixdtf_tag_only_no_zone_test() {
   assert parser.parse_ixdtf("1996-12-19T16:39:57-08:00[u-ca=hebrew]")
-    == Ok(Ixdtf(
-      1996,
-      12,
-      19,
-      16,
-      39,
-      57,
-      0,
-      -480,
-      None,
-      [Tag(False, "u-ca", "hebrew")],
-    ))
+    == Ok(
+      Ixdtf(1996, 12, 19, 16, 39, 57, 0, -480, None, [
+        Tag(False, "u-ca", "hebrew"),
+      ]),
+    )
 }
 
 pub fn ixdtf_hyphenated_value_preserved_test() {
@@ -130,18 +107,20 @@ pub fn rfc_figure_4_test() {
 // Figure 5: adding a time zone name.
 pub fn rfc_figure_5_test() {
   assert parser.parse_ixdtf("1996-12-19T16:39:57-08:00[America/Los_Angeles]")
-    == Ok(Ixdtf(
-      1996,
-      12,
-      19,
-      16,
-      39,
-      57,
-      0,
-      -480,
-      Some(Zone(False, "America/Los_Angeles")),
-      [],
-    ))
+    == Ok(
+      Ixdtf(
+        1996,
+        12,
+        19,
+        16,
+        39,
+        57,
+        0,
+        -480,
+        Some(Zone(False, "America/Los_Angeles")),
+        [],
+      ),
+    )
 }
 
 // Figure 6: projecting to the Hebrew calendar (zone + u-ca tag).
@@ -149,53 +128,40 @@ pub fn rfc_figure_6_test() {
   assert parser.parse_ixdtf(
       "1996-12-19T16:39:57-08:00[America/Los_Angeles][u-ca=hebrew]",
     )
-    == Ok(Ixdtf(
-      1996,
-      12,
-      19,
-      16,
-      39,
-      57,
-      0,
-      -480,
-      Some(Zone(False, "America/Los_Angeles")),
-      [Tag(False, "u-ca", "hebrew")],
-    ))
+    == Ok(
+      Ixdtf(
+        1996,
+        12,
+        19,
+        16,
+        39,
+        57,
+        0,
+        -480,
+        Some(Zone(False, "America/Los_Angeles")),
+        [Tag(False, "u-ca", "hebrew")],
+      ),
+    )
 }
 
 // Figure 7: experimental tags (leading underscore), no zone.
 pub fn rfc_figure_7_test() {
   assert parser.parse_ixdtf("1996-12-19T16:39:57-08:00[_foo=bar][_baz=bat]")
-    == Ok(Ixdtf(
-      1996,
-      12,
-      19,
-      16,
-      39,
-      57,
-      0,
-      -480,
-      None,
-      [Tag(False, "_foo", "bar"), Tag(False, "_baz", "bat")],
-    ))
+    == Ok(
+      Ixdtf(1996, 12, 19, 16, 39, 57, 0, -480, None, [
+        Tag(False, "_foo", "bar"),
+        Tag(False, "_baz", "bat"),
+      ]),
+    )
 }
 
 // Section 3.3 / 3.4: critical flags are recorded (osler leaves acting on them
 // to the caller). Z is a known-UTC-offset-unknown local offset.
 pub fn rfc_critical_zone_test() {
   assert parser.parse_ixdtf("2022-07-08T00:14:07+01:00[!Europe/Paris]")
-    == Ok(Ixdtf(
-      2022,
-      7,
-      8,
-      0,
-      14,
-      7,
-      0,
-      60,
-      Some(Zone(True, "Europe/Paris")),
-      [],
-    ))
+    == Ok(
+      Ixdtf(2022, 7, 8, 0, 14, 7, 0, 60, Some(Zone(True, "Europe/Paris")), []),
+    )
 }
 
 pub fn rfc_critical_tags_test() {
@@ -203,18 +169,12 @@ pub fn rfc_critical_tags_test() {
   assert parser.parse_ixdtf(
       "2022-07-08T00:14:07Z[!u-ca=chinese][u-ca=japanese]",
     )
-    == Ok(Ixdtf(
-      2022,
-      7,
-      8,
-      0,
-      14,
-      7,
-      0,
-      0,
-      None,
-      [Tag(True, "u-ca", "chinese"), Tag(False, "u-ca", "japanese")],
-    ))
+    == Ok(
+      Ixdtf(2022, 7, 8, 0, 14, 7, 0, 0, None, [
+        Tag(True, "u-ca", "chinese"),
+        Tag(False, "u-ca", "japanese"),
+      ]),
+    )
 }
 
 pub fn rfc_duplicate_keys_kept_in_order_test() {
@@ -222,25 +182,17 @@ pub fn rfc_duplicate_keys_kept_in_order_test() {
   // caller's policy, not ours.
   let assert Ok(ix) =
     parser.parse_ixdtf("2022-07-08T00:14:07Z[u-ca=chinese][u-ca=japanese]")
-  assert ix.tags == [Tag(False, "u-ca", "chinese"), Tag(False, "u-ca", "japanese")]
+  assert ix.tags
+    == [Tag(False, "u-ca", "chinese"), Tag(False, "u-ca", "japanese")]
 }
 
 pub fn rfc_unknown_critical_tag_recorded_test() {
   // [!knort=blargel] -- an unknown critical tag still parses; acting on the
   // critical flag is the caller's job.
   assert parser.parse_ixdtf("2022-07-08T00:14:07Z[!knort=blargel]")
-    == Ok(Ixdtf(
-      2022,
-      7,
-      8,
-      0,
-      14,
-      7,
-      0,
-      0,
-      None,
-      [Tag(True, "knort", "blargel")],
-    ))
+    == Ok(
+      Ixdtf(2022, 7, 8, 0, 14, 7, 0, 0, None, [Tag(True, "knort", "blargel")]),
+    )
 }
 
 // osler.parse_ixdtf: Timestamp + offset + suffix, with date/time validation.
@@ -291,18 +243,7 @@ pub fn ixdtf_accepts_loose_datetime_forms_test() {
 
 pub fn ixdtf_critical_offset_zone_test() {
   assert parser.parse_ixdtf("2022-07-08T00:14:07+08:45[!+08:45]")
-    == Ok(Ixdtf(
-      2022,
-      7,
-      8,
-      0,
-      14,
-      7,
-      0,
-      525,
-      Some(Zone(True, "+08:45")),
-      [],
-    ))
+    == Ok(Ixdtf(2022, 7, 8, 0, 14, 7, 0, 525, Some(Zone(True, "+08:45")), []))
 }
 
 pub fn ixdtf_mixed_critical_tags_test() {

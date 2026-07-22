@@ -68,9 +68,7 @@ fn report(label: String, parse: fn(String) -> Result(a, Nil)) -> Nil {
   let _ = run(warmup, parse, 0)
   let ns = best_ns_per_op(rounds, parse, 1.0e18)
   io.println(
-    string.pad_end(label, 52, " ")
-    <> int.to_string(float.round(ns))
-    <> " ns/op",
+    string.pad_end(label, 52, " ") <> int.to_string(float.round(ns)) <> " ns/op",
   )
 }
 

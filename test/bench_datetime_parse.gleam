@@ -1,4 +1,6 @@
 @target(erlang)
+import bench_native
+@target(erlang)
 import gleam/time/timestamp
 @target(erlang)
 import glychee/benchmark
@@ -9,6 +11,7 @@ import osler
 @target(erlang)
 import osler/parser
 
+@target(erlang)
 /// Compares osler's RFC 9557 (IXDTF) parser against `gleam_time`'s RFC 3339
 /// parser on the same plain RFC 3339 input (no suffix -- the only kind
 /// `gleam_time` can parse, so it is the apples-to-apples comparison):
@@ -19,10 +22,13 @@ import osler/parser
 /// - `osler.parse_ixdtf` builds `calendar.Date`/`calendar.TimeOfDay` values
 ///   and validates them via `gleam_time`'s calendar module.
 /// - `timestamp.parse_rfc3339` is `gleam_time`'s own parser, the baseline.
+/// - `calendar:rfc3339_to_system_time` is OTP's built-in one. It returns a
+///   bare `Int` of nanoseconds instead of a `Timestamp`, so the fairest osler
+///   comparison is `osler.parse_timestamp` -- also included. See
+///   `bench_native` for the rest of the caveats.
 ///
 /// Run with:
 ///   gleam run -m bench_datetime_parse
-@target(erlang)
 fn discard(_result: a) -> Nil {
   Nil
 }
@@ -49,9 +55,21 @@ pub fn main() {
         },
       ),
       benchmark.Function(
+        label: "osler.parse_timestamp (instant only)",
+        callable: fn(test_data) {
+          fn() { osler.parse_timestamp(test_data) |> discard }
+        },
+      ),
+      benchmark.Function(
         label: "timestamp.parse_rfc3339 (gleam_time)",
         callable: fn(test_data) {
           fn() { timestamp.parse_rfc3339(test_data) |> discard }
+        },
+      ),
+      benchmark.Function(
+        label: "calendar:rfc3339_to_system_time (OTP built-in)",
+        callable: fn(test_data) {
+          fn() { bench_native.rfc3339_to_system_time(test_data) |> discard }
         },
       ),
     ],

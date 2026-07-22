@@ -47,7 +47,10 @@ fn alphanum() -> List(Int) {
 
 // --- String-piece generators ------------------------------------------------
 
-fn fixed(gen: qcheck.Generator(UtfCodepoint), length: Int) -> qcheck.Generator(String) {
+fn fixed(
+  gen: qcheck.Generator(UtfCodepoint),
+  length: Int,
+) -> qcheck.Generator(String) {
   qcheck.fixed_length_string_from(gen, length)
 }
 
@@ -74,7 +77,8 @@ fn named_zone_name() -> qcheck.Generator(String) {
 }
 
 fn offset_zone_name() -> qcheck.Generator(String) {
-  let sign = qcheck.from_generators(qcheck.constant("+"), [qcheck.constant("-")])
+  let sign =
+    qcheck.from_generators(qcheck.constant("+"), [qcheck.constant("-")])
   let two = fixed(cp(digits()), 2)
   qcheck.map3(sign, two, two, fn(s, hh, mm) { s <> hh <> ":" <> mm })
 }

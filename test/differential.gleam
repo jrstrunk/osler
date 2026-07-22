@@ -8,17 +8,61 @@
 ////   gleam run -m differential --target javascript > /tmp/js.txt
 ////   diff /tmp/erl.txt /tmp/js.txt
 
+import gleam/float
 import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/time/duration
+import gleam/time/timestamp
+import osler
 import osler/parser.{type Ixdtf, type Tag, type Zone, Ixdtf, Tag, Zone}
 
 pub fn main() {
   inputs()
   |> list.each(fn(input) {
     io.println(input <> " => " <> format(parser.parse_ixdtf(input)))
+    // Also cover the fully-validated instant path: on JS this exercises the
+    // fused `fast_timestamp` FFI, on Erlang the general body -- diffing the two
+    // runs proves they agree across the whole corpus.
+    io.println(input <> " ts=> " <> format_ts(osler.parse_timestamp(input)))
+    // And the fused validated `osler.parse_ixdtf` (Timestamp + offset + suffix).
+    io.println(input <> " ix=> " <> format_full(osler.parse_ixdtf(input)))
   })
+}
+
+fn format_full(
+  result: Result(
+    #(timestamp.Timestamp, duration.Duration, Option(Zone), List(Tag)),
+    Nil,
+  ),
+) -> String {
+  case result {
+    Error(Nil) -> "Error"
+    Ok(#(ts, offset, zone, tags)) -> {
+      let #(secs, ns) = timestamp.to_unix_seconds_and_nanoseconds(ts)
+      "Ok "
+      <> int.to_string(secs)
+      <> "|"
+      <> int.to_string(ns)
+      <> "|"
+      <> int.to_string(duration.to_seconds(offset) |> float.round)
+      <> "|"
+      <> format_zone(zone)
+      <> "|"
+      <> format_tags(tags)
+    }
+  }
+}
+
+fn format_ts(result: Result(timestamp.Timestamp, Nil)) -> String {
+  case result {
+    Error(Nil) -> "Error"
+    Ok(ts) -> {
+      let #(secs, ns) = timestamp.to_unix_seconds_and_nanoseconds(ts)
+      "Ok " <> int.to_string(secs) <> "|" <> int.to_string(ns)
+    }
+  }
 }
 
 // A canonical, target-stable rendering (unlike `string.inspect`, which shows
@@ -103,8 +147,7 @@ fn suffixes() -> List(String) {
   let singles = brackets
 
   // ...a leading `!` critical variant of each single group...
-  let criticals =
-    list.map(group_bodies(), fn(body) { "[!" <> body <> "]" })
+  let criticals = list.map(group_bodies(), fn(body) { "[!" <> body <> "]" })
 
   // ...pairs of groups (zone-ish followed by tag-ish, and tag+tag)...
   let pairs =
