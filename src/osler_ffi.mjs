@@ -98,7 +98,7 @@ const POW10 = [
 const SHARED_NONE = new None();
 const EMPTY_TAGS = toList([]);
 
-// A shared "fall back to the general parser" sentinel for `fast_timestamp`.
+// A shared failure sentinel, so a miss allocates nothing.
 // Safe to reuse: the Gleam caller only checks `instanceof Ok`, never reads the
 // error payload, so no per-call `Error` allocation is needed on the miss path.
 const FALLBACK = new Error(undefined);
@@ -591,7 +591,7 @@ function parseSuffix(str, state) {
 // end of the string `charCodeAt` yields `NaN`, and `NaN >>> 0` is `0`, which
 // would read as a digit and spin the fraction loop forever. `NaN >= 0` is
 // `false`, so this form stops correctly at end-of-input.
-function parseIxdtfFast(str) {
+function parseIxdtfCanonical(str) {
   const n = str.length;
 
   const y1 = str.charCodeAt(0) - CHAR_0;
@@ -695,9 +695,9 @@ function parseIxdtfFast(str) {
   );
 }
 
-export function parse_ixdtf(str) {
-  const fast = parseIxdtfFast(str);
-  if (fast !== null) return fast;
+export function parse_ixdtf_parts(str) {
+  const canonical = parseIxdtfCanonical(str);
+  if (canonical !== null) return canonical;
 
   const state = { i: 0 };
   if (!parseDate(str, state)) return new Error(undefined);
@@ -731,8 +731,8 @@ export function parse_ixdtf(str) {
 //
 // `scanCanonicalInstant` parses AND validates AND computes the epoch seconds of
 // the canonical suffix-free shape in a single pass, never allocating the
-// intermediate `Ixdtf` the two-step path pays for. `fast_timestamp` and
-// `fast_ixdtf` share it and differ only in how they wrap the result -- this is
+// intermediate `Ixdtf` a two-step path would pay for. `parse_timestamp` and
+// `parse_ixdtf` share it and differ only in how they wrap the result -- this is
 // what lets the fully-validated JS paths beat `Temporal.Instant.from`.
 //
 // They succeed ONLY for a canonical, fully-valid input; for anything else --
@@ -756,6 +756,50 @@ function daysInMonth(month, year) {
     default:
       return 0; // invalid month -> no day can be <= 0
   }
+}
+
+// Month 1-12, a day within that month's real length, and an hour/minute/second
+// in range -- plus ISO 8601's `24:00:00` and `23:59:60`. Mirrors `osler`'s
+// `valid_fields`.
+function validFields(year, month, day, hour, minute, second) {
+  if (day < 1 || day > daysInMonth(month, year)) return false;
+  return (
+    (hour <= 23 && minute <= 59 && second <= 59) ||
+    (hour === 24 && minute === 0 && second === 0) ||
+    (hour === 23 && minute === 59 && second === 60)
+  );
+}
+
+// Seconds since the Unix epoch. Same Julian-day result as `osler`'s
+// `seconds_since_epoch` (byte-identical `Timestamp`), with the five integer
+// divisions of the textbook formula reduced to one: `adjustment` is a
+// `month <= 2` test, `(153*am+2)/5` is the `DAYS_BEFORE_MONTH` lookup, and --
+// since `ay > 0` always -- `ay/4` is `ay >> 2` while `ay/400` is `(ay/100) >> 2`
+// by the nested-floor identity `floor(floor(x/100)/4) === floor(x/400)`. The one
+// surviving division V8 already strength-reduces to a multiply. Verified
+// bit-identical to the direct formula across every date 0000-9999.
+function secondsSinceEpoch(year, month, day, hour, minute, second, offsetMinutes) {
+  const adjustment = month <= 2 ? 1 : 0;
+  const ay = year + 4800 - adjustment;
+  const am = month + 12 * adjustment - 3;
+  const ayDiv100 = Math.trunc(ay / 100);
+  const julianDay =
+    day + DAYS_BEFORE_MONTH[am] + 365 * ay + (ay >> 2) - ayDiv100 +
+    (ayDiv100 >> 2) - 32045;
+  return (
+    julianDay * 86400 + hour * 3600 + minute * 60 + second - 210866803200 -
+    offsetMinutes * 60
+  );
+}
+
+// False if the suffix carries a critical (`!`) zone or tag, which a
+// suffix-dropping parse must not silently discard (RFC 9557 section 3.3).
+function noCriticalFlags(zone, tags) {
+  if (zone instanceof Some && zone[0].critical) return false;
+  for (let c = tags; c instanceof NonEmpty; c = c.tail) {
+    if (c.head.critical) return false;
+  }
+  return true;
 }
 
 // Filled by `scanCanonicalInstant` on success and read back by its callers.
@@ -851,63 +895,87 @@ function scanCanonicalInstant(str) {
 
   if (i !== n) return false; // a suffix is present -> let the general path decide
 
-  // Calendar/time validation, matching `osler`'s `valid_date`/`is_valid_time`
-  // (leap-aware day count; the `24:00:00` and `23:59:60` special cases).
-  if (day < 1 || day > daysInMonth(month, year)) return false;
-  const timeOk =
-    (hour <= 23 && minute <= 59 && second <= 59) ||
-    (hour === 24 && minute === 0 && second === 0) ||
-    (hour === 23 && minute === 59 && second === 60);
-  if (!timeOk) return false;
+  if (!validFields(year, month, day, hour, minute, second)) return false;
 
-  // Seconds since the Unix epoch. Same Julian-day result as `osler`'s
-  // `seconds_since_epoch` (byte-identical `Timestamp`), but with the five
-  // integer divisions of that formula reduced to one: `adjustment` is a
-  // `month <= 2` test, `(153*am+2)/5` is the `DAYS_BEFORE_MONTH` lookup, and --
-  // since `ay > 0` always -- `ay/4` is `ay >> 2` while `ay/400` is `(ay/100) >> 2`
-  // by the nested-floor identity `floor(floor(x/100)/4) === floor(x/400)`. The
-  // one surviving division (`ay/100`) V8 already strength-reduces to a multiply.
-  // Verified bit-identical to the direct formula across every date 0000-9999.
-  const adjustment = month <= 2 ? 1 : 0;
-  const ay = year + 4800 - adjustment;
-  const am = month + 12 * adjustment - 3;
-  const ayDiv100 = Math.trunc(ay / 100);
-  const julianDay =
-    day +
-    DAYS_BEFORE_MONTH[am] +
-    365 * ay +
-    (ay >> 2) -
-    ayDiv100 +
-    (ayDiv100 >> 2) -
-    32045;
-  INSTANT.seconds =
-    julianDay * 86400 +
-    hour * 3600 +
-    minute * 60 +
-    second -
-    210866803200 -
-    offsetMinutes * 60;
+  INSTANT.seconds = secondsSinceEpoch(
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    offsetMinutes,
+  );
   INSTANT.nanosecond = nanosecond;
   INSTANT.offsetMinutes = offsetMinutes;
   return true;
 }
 
-export function fast_timestamp(str) {
-  if (!scanCanonicalInstant(str)) return FALLBACK;
+// `osler.parse_timestamp`. The canonical shape is parsed, validated and built
+// in one pass; every other shape goes through the full RFC 9557 parser and is
+// validated from its parts.
+export function parse_timestamp(str) {
+  if (scanCanonicalInstant(str)) {
+    return new Ok(
+      from_unix_seconds_and_nanoseconds(INSTANT.seconds, INSTANT.nanosecond),
+    );
+  }
+  const parsed = parse_ixdtf_parts(str);
+  if (!(parsed instanceof Ok)) return FALLBACK;
+  const i = parsed[0];
+  if (!validFields(i.year, i.month, i.day, i.hour, i.minute, i.second)) {
+    return FALLBACK;
+  }
+  if (!noCriticalFlags(i.zone, i.tags)) return FALLBACK;
   return new Ok(
-    from_unix_seconds_and_nanoseconds(INSTANT.seconds, INSTANT.nanosecond),
+    from_unix_seconds_and_nanoseconds(
+      secondsSinceEpoch(
+        i.year,
+        i.month,
+        i.day,
+        i.hour,
+        i.minute,
+        i.second,
+        i.offset_minutes,
+      ),
+      i.nanosecond,
+    ),
   );
 }
 
-export function fast_ixdtf(str) {
-  if (!scanCanonicalInstant(str)) return FALLBACK;
-  // Mirrors `osler.parse_ixdtf`'s success tuple `#(Timestamp, Duration, zone,
-  // tags)`; canonical input is suffix-free, so zone is `None` and tags empty.
+// `osler.parse_ixdtf`, returning `#(Timestamp, Duration, zone, tags)`.
+// Canonical input is suffix-free, so the fused path yields no zone and no tags.
+export function parse_ixdtf(str) {
+  if (scanCanonicalInstant(str)) {
+    return new Ok([
+      from_unix_seconds_and_nanoseconds(INSTANT.seconds, INSTANT.nanosecond),
+      duration_minutes(INSTANT.offsetMinutes),
+      SHARED_NONE,
+      EMPTY_TAGS,
+    ]);
+  }
+  const parsed = parse_ixdtf_parts(str);
+  if (!(parsed instanceof Ok)) return FALLBACK;
+  const i = parsed[0];
+  if (!validFields(i.year, i.month, i.day, i.hour, i.minute, i.second)) {
+    return FALLBACK;
+  }
   return new Ok([
-    from_unix_seconds_and_nanoseconds(INSTANT.seconds, INSTANT.nanosecond),
-    duration_minutes(INSTANT.offsetMinutes),
-    SHARED_NONE,
-    EMPTY_TAGS,
+    from_unix_seconds_and_nanoseconds(
+      secondsSinceEpoch(
+        i.year,
+        i.month,
+        i.day,
+        i.hour,
+        i.minute,
+        i.second,
+        i.offset_minutes,
+      ),
+      i.nanosecond,
+    ),
+    duration_minutes(i.offset_minutes),
+    i.zone,
+    i.tags,
   ]);
 }
 
@@ -918,10 +986,6 @@ export function fast_ixdtf(str) {
 // name (`d.constructor.name`), which Gleam's non-minified JS codegen keeps
 // stable. `Parts` fields are Gleam `Option`s, so absent stays distinct from
 // zero.
-
-function some(v) {
-  return new Some(v);
-}
 
 function optVal(o) {
   return o instanceof Some ? o[0] : undefined;
@@ -1043,13 +1107,11 @@ function isTimeSep(c) {
 
 // --- directive dispatch ------------------------------------------------------
 //
-// `stepParse` used to switch on `d.constructor.name`. That cost ~530ns of a
-// 3000ns 14-directive parse, for two reasons: `Function.prototype.name` is a
-// lazy accessor in V8 rather than a plain slot, and a 35-case string switch is
-// a chain of comparisons whose late entries (`Literal`, `IsoDate`) are exactly
-// the ones a real format list uses most. Mapping the constructor *object* to a
-// dense small integer once, then switching on that, gives V8 a jump table and
-// never touches `.name`.
+// Directives dispatch on a dense small integer, mapped from the constructor
+// *object*, so the switch compiles to a jump table. Switching on
+// `d.constructor.name` instead would touch `Function.prototype.name` -- a lazy
+// accessor in V8, not a plain slot -- and turn a 35-case string switch into a
+// chain of comparisons whose late entries are the ones format lists use most.
 // Built lazily, not at module load: `osler/parser.mjs` imports this module
 // for its `@external`s, so the directive classes are still in their temporal
 // dead zone while this module's top level runs. One null check per directive
@@ -1367,32 +1429,23 @@ function stepParse(d, str, state, p) {
 }
 
 // `SHARED_NONE`, not `new None()`: an absent field is the common case in a
-// real format list (a date-only format leaves eight of the twelve empty), and
-// `None` carries no payload, so a fresh one per absent field was pure garbage.
-// Same reasoning as the `parse_ixdtf` path, which has used the singleton all
-// along -- this function simply never got the treatment.
-function optOf(v) {
-  return v === undefined ? SHARED_NONE : new Some(v);
-}
-
+// format list -- a date-only format leaves eight of the twelve empty -- and
+// `None` carries no payload.
 // Interned `Some` for small non-negative integers.
 //
-// `new Some(v)` measured ~155ns -- twenty times a 12-field `new Parts(...)` at
-// 8ns. The reason is the representation: Gleam gives positional variant fields
-// integer keys (`this[0] = x`), and an integer-keyed property lands in V8's
-// *elements* backing store, so every `Some` allocates a JSObject **and** a
-// FixedArray and takes the indexed-store slow path. Named fields, as `Parts`
-// has, are in-object slots. Eight `Some`s were 1586ns of a 2267ns parse -- far
-// more than the scanning.
+// A `Some` is expensive here, and it is the representation that makes it so:
+// Gleam gives positional variant fields integer keys (`this[0] = x`), and an
+// integer-keyed property lands in V8's *elements* backing store, so each one
+// allocates a JSObject **and** a FixedArray and takes the indexed-store slow
+// path. Named fields, as `Parts` has, are in-object slots -- which is why a
+// twelve-field `Parts` costs a fraction of one `Some`.
 //
 // They can safely be shared: a Gleam `Option` is immutable, `==` on it is
-// structural (`isEqual`), and no identity comparison is exposed, which is the
-// same argument that already justifies `SHARED_NONE`. The table is filled
-// lazily, so a program pays only for the values it actually parses.
-//
-// 4096 covers every time field (month, day, hour, minute, second), positive
-// offsets, and the years anyone is realistically parsing. Anything else falls
-// through to a fresh `Some`, which is merely the old behaviour.
+// structural (`isEqual`), and no identity comparison is exposed -- the same
+// argument that justifies `SHARED_NONE`. The table fills lazily, so a program
+// pays only for the values it actually parses, and 4096 covers every time
+// field, positive offsets, and any year worth caching. Anything else gets a
+// fresh `Some`.
 const SOME_INT_MAX = 4096;
 const SOME_INT = new Array(SOME_INT_MAX);
 
@@ -1412,9 +1465,8 @@ function optInt(v) {
 export function parse(input, directives) {
   const state = { i: 0 };
   const p = {};
-  // Walk the Gleam list by `head`/`tail` rather than `for...of`. The list's
-  // `Symbol.iterator` allocates a `ListIterator` plus a `{value, done}` object
-  // per element -- 15 objects to walk 14 directives, ~136ns of a 3000ns parse.
+  // Walk the Gleam list by `head`/`tail`: its `Symbol.iterator` allocates a
+  // `ListIterator` plus a `{value, done}` object per element.
   for (let c = directives; c instanceof NonEmpty; c = c.tail) {
     if (!stepParse(c.head, input, state, p)) return FALLBACK;
   }
@@ -1597,13 +1649,11 @@ export function format(parts, directives) {
 
 // --- parse_any ---------------------------------------------------------------
 //
-// A charCodeAt mirror of `osler.parse_any`. The Gleam version consumes its
-// `BitArray` one byte at a time, and on JS every `<<b, rest:bytes>>` calls
-// `bitArraySlice`, which allocates a `Uint8Array` view *and* a `BitArray`
-// wrapper -- two heavyweight allocations per byte position, across five
-// scanning passes. That was the whole reason `parse_any` ran ~10x slower here
-// than on BEAM. This version never slices: it walks indices into the string
-// and reads code units, so a rejected position costs a comparison.
+// A charCodeAt mirror of `osler.parse_any`. It never slices: it walks indices
+// into the string and reads code units, so a rejected position costs a
+// comparison. Consuming a `BitArray` byte by byte instead would call
+// `bitArraySlice` at every position of all five scanning passes, allocating a
+// `Uint8Array` view *and* a `BitArray` wrapper each time.
 //
 // Everything below mirrors the Gleam function-for-function, and the two are
 // checked against each other over 2244 inputs by `test/differential.gleam`.

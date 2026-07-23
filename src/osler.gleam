@@ -1,16 +1,9 @@
-//// Fast, regex-free parsing and rendering of date/time strings.
+//// Fast parsing and rendering of date/time strings.
 ////
-//// `parse_ixdtf` parses the full RFC 9557 (IXDTF) format, returning a
-//// `Timestamp` plus any time zone name and `[key=value]` extension tags from
-//// the suffix. `format` is the inverse for arbitrary custom formats: it
-//// renders a `Timestamp` (plus offset, zone, and tags) through a
-//// `List(osler/parser.Directive)`.
-////
-//// For custom-format *parsing* -- and for the composable directive vocabulary
-//// both share -- see the `osler/parser` module. `parser.parse` returns the
-//// raw, unvalidated `Parts` each directive filled in; validate them or turn
-//// them into whatever domain types you like. This module is the
-//// `Timestamp`-centered layer on top.
+//// This module is centered around the `gleam_time` `Timestamp` type and exists
+//// for convenience and as an example of how to use the underlying parsers and
+//// formatters. If you want an unopinionated parser and formatter to build your
+//// application or library around, see the `parser` module.
 
 import gleam/bit_array
 import gleam/float
@@ -20,30 +13,19 @@ import gleam/result
 import gleam/time/calendar
 import gleam/time/duration.{type Duration}
 import gleam/time/timestamp.{type Timestamp}
-import osler/internal
 import osler/parser
 
-/// Parses a full RFC 9557 (IXDTF) timestamp: an RFC 3339 date-time (with a
-/// **required** offset) followed by an optional suffix -- a time zone and/or
-/// any number of `[key=value]` extension tags.
+/// Parses a full RFC 9557 (IXDTF) timestamp, which is an RFC 3339 date-time
+/// followed by an optional time zone and/or any number of `[key=value]`
+/// extension tags.
 ///
 /// Returns the absolute `Timestamp`, the parsed offset (handed back
 /// alongside since a `Timestamp` alone can't tell you what offset the string
 /// was written in), and the suffix: an optional `parser.Zone` and a list of
 /// `parser.Tag`s in the order they appeared.
 ///
-/// Because a `Timestamp` is an absolute instant, ISO 8601's two special time
-/// values -- `24:00:00` (end of day) and `23:59:60` (leap second) -- are
-/// normalized to their equivalent ordinary instant (e.g.
-/// `2024-06-30T24:00:00Z` becomes the same `Timestamp` as
-/// `2024-07-01T00:00:00Z`).
-///
-/// The suffix is captured losslessly -- the zone name and each tag's key and
-/// value come back exactly as written, so the original suffix can be
-/// reproduced. osler does **not** resolve the zone against a time zone
-/// database or check it for consistency with the offset (RFC 9557 §3.4);
-/// that policy, along with any handling of `critical` tags and duplicate
-/// keys, is left to the caller.
+/// This function does not validate the zone or any tags in the suffix,
+/// assuring only that they are well-formed.
 ///
 /// ## Examples
 ///
@@ -58,79 +40,54 @@ import osler/parser
 /// //   [parser.Tag(False, "u-ca", "hebrew")],
 /// // ))
 /// ```
+/// The JavaScript target has its own implementation in `osler_ffi.mjs`; this
+/// body is the Erlang one. It validates and builds the `Timestamp` straight
+/// from the raw ints -- no intermediate `calendar.Date`/`TimeOfDay`, and no
+/// second pass of calendar arithmetic on top of the validation. The seconds
+/// come from the same Julian-day formula `gleam/time/timestamp` applies
+/// internally, so the `Timestamp` is identical to `from_calendar`'s, including
+/// the `24:00` and leap-second folds.
+@external(javascript, "./osler_ffi.mjs", "parse_ixdtf")
 pub fn parse_ixdtf(
   str: String,
 ) -> Result(#(Timestamp, Duration, Option(parser.Zone), List(parser.Tag)), Nil) {
-  case fast_ixdtf(str) {
-    Ok(result) -> Ok(result)
-    // The fast path returns `Error` for anything non-canonical (compact forms,
-    // suffixes) or invalid; the general body below then decides definitively.
-    Error(Nil) -> parse_ixdtf_slow(str)
-  }
-}
-
-// On JavaScript this is a fused, single-pass parse+validate+build that skips
-// the intermediate `Ixdtf` for the canonical suffix-free shape (it beats
-// `Temporal.Instant.from`). On Erlang there is no fast path -- the general body
-// is already ~2x faster than native -- so this reports "fall back" and
-// `parse_ixdtf_slow` runs. Shares the `Timestamp` scanner with `fast_timestamp`.
-@external(javascript, "./osler_ffi.mjs", "fast_ixdtf")
-fn fast_ixdtf(
-  _str: String,
-) -> Result(#(Timestamp, Duration, Option(parser.Zone), List(parser.Tag)), Nil) {
-  Error(Nil)
-}
-
-fn parse_ixdtf_slow(
-  str: String,
-) -> Result(#(Timestamp, Duration, Option(parser.Zone), List(parser.Tag)), Nil) {
-  // Validate and build the `Timestamp` straight from the raw ints: no
-  // intermediate `calendar.Date`/`TimeOfDay` (nor the `Month` enum round-trip),
-  // and no duplicate calendar arithmetic in `from_calendar` on top of the
-  // validation. The seconds use the same Julian-day formula
-  // `gleam/time/timestamp` applies internally, so the `Timestamp` is identical
-  // (both go through the same `normalise`, incl. the `24:00`/leap-second fold).
   case parser.parse_ixdtf(str) {
     Error(Nil) -> Error(Nil)
-    Ok(ixdtf) ->
-      case
-        valid_date(ixdtf.year, ixdtf.month, ixdtf.day)
-        && is_valid_time(ixdtf.hour, ixdtf.minute, ixdtf.second)
-      {
+    Ok(i) ->
+      case valid_fields(i) {
         False -> Error(Nil)
         True ->
           Ok(#(
-            to_timestamp(
-              ixdtf.year,
-              ixdtf.month,
-              ixdtf.day,
-              ixdtf.hour,
-              ixdtf.minute,
-              ixdtf.second,
-              ixdtf.nanosecond,
-              ixdtf.offset_minutes,
-            ),
-            duration.minutes(ixdtf.offset_minutes),
-            ixdtf.zone,
-            ixdtf.tags,
+            to_timestamp(i),
+            duration.minutes(i.offset_minutes),
+            i.zone,
+            i.tags,
           ))
       }
   }
 }
 
-fn to_timestamp(
-  year: Int,
-  month: Int,
-  day: Int,
-  hour: Int,
-  minute: Int,
-  second: Int,
-  nanosecond: Int,
-  offset_minutes: Int,
-) -> Timestamp {
-  let seconds =
-    seconds_since_epoch(year, month, day, hour, minute, second, offset_minutes)
-  timestamp.from_unix_seconds_and_nanoseconds(seconds, nanosecond)
+fn to_timestamp(i: parser.Ixdtf) -> Timestamp {
+  timestamp.from_unix_seconds_and_nanoseconds(
+    seconds_since_epoch(
+      i.year,
+      i.month,
+      i.day,
+      i.hour,
+      i.minute,
+      i.second,
+      i.offset_minutes,
+    ),
+    i.nanosecond,
+  )
+}
+
+// Month 1-12, a day within that month's real length, and an hour/minute/second
+// in range. Checked off the raw ints, with no `calendar.Date`/`TimeOfDay`
+// construction.
+fn valid_fields(i: parser.Ixdtf) -> Bool {
+  valid_date(i.year, i.month, i.day)
+  && is_valid_time(i.hour, i.minute, i.second)
 }
 
 // Seconds since the Unix epoch, using the same Julian-day formula
@@ -145,18 +102,11 @@ fn to_timestamp(
 // `/4` on a non-negative value is an arithmetic shift, and `/100` is the usual
 // multiply-shift, `(v * 5243) >> 19`.
 //
-// BEAM's `div` is a real, costly instruction -- unlike V8, which const-folds it
-// -- so this arithmetic is worth attacking here and not on JS. The shifts are
-// ~11ns/op over the divisions, reproduced across runs in
-// `test/bench_erl_decompose.gleam`.
-//
 // The multiply-shift is only exact over a bounded domain. `year` comes from a
 // 4-digit field, so `adjusted_year` is confined to 4799..14799, and
-// `(v * 5243) >> 19 == v / 100` is verified for **every** value in that range
-// (as is `>> 2 == / 4`, for both `adjusted_year` and `ay_div_100`). If the
-// parser ever accepts years outside 0000-9999, re-verify or revert to `/`.
-// The whole formula stays bit-identical across every date 0000-9999 and under
-// the `differential` harness.
+// `(v * 5243) >> 19 == v / 100` is verified for **every** value in that range,
+// as is `>> 2 == / 4` for both `adjusted_year` and `ay_div_100`. If the parser
+// ever accepts years outside 0000-9999, re-verify or revert to `/`.
 fn seconds_since_epoch(
   year: Int,
   month: Int,
@@ -233,46 +183,16 @@ fn days_before_month(am: Int) -> Int {
 /// osler.parse_timestamp("2024-06-13T23:04:00Z[!u-ca=hebrew]")
 /// // -> Error(Nil)           // critical tag cannot be dropped
 /// ```
+/// As with `parse_ixdtf`, the JavaScript target implements this in
+/// `osler_ffi.mjs` and this body is the Erlang one.
+@external(javascript, "./osler_ffi.mjs", "parse_timestamp")
 pub fn parse_timestamp(str: String) -> Result(Timestamp, Nil) {
-  case fast_timestamp(str) {
-    Ok(timestamp) -> Ok(timestamp)
-    // The fast path returns `Error` for anything non-canonical (compact forms,
-    // suffixes) or invalid; the general body below then decides definitively.
-    Error(Nil) -> parse_timestamp_slow(str)
-  }
-}
-
-// On JavaScript this is a fused, single-pass parse+validate+build that skips
-// the intermediate `Ixdtf` allocation for the canonical suffix-free shape (it
-// beats `Temporal.Instant.from`). On Erlang there is no fast path -- the
-// general body is already ~2.5x faster than native `calendar:rfc3339_to_system_time`
-// -- so this just reports "fall back" and `parse_timestamp_slow` runs.
-@external(javascript, "./osler_ffi.mjs", "fast_timestamp")
-fn fast_timestamp(_str: String) -> Result(Timestamp, Nil) {
-  Error(Nil)
-}
-
-fn parse_timestamp_slow(str: String) -> Result(Timestamp, Nil) {
   case parser.parse_ixdtf(str) {
     Error(Nil) -> Error(Nil)
-    Ok(ixdtf) ->
-      case
-        valid_date(ixdtf.year, ixdtf.month, ixdtf.day)
-        && is_valid_time(ixdtf.hour, ixdtf.minute, ixdtf.second)
-        && no_critical_flags(ixdtf.zone, ixdtf.tags)
-      {
+    Ok(i) ->
+      case valid_fields(i) && no_critical_flags(i.zone, i.tags) {
         False -> Error(Nil)
-        True ->
-          Ok(to_timestamp(
-            ixdtf.year,
-            ixdtf.month,
-            ixdtf.day,
-            ixdtf.hour,
-            ixdtf.minute,
-            ixdtf.second,
-            ixdtf.nanosecond,
-            ixdtf.offset_minutes,
-          ))
+        True -> Ok(to_timestamp(i))
       }
   }
 }
@@ -280,12 +200,9 @@ fn parse_timestamp_slow(str: String) -> Result(Timestamp, Nil) {
 // True unless the suffix carries a critical (`!`) time zone or tag, which a
 // suffix-dropping parse must not silently discard (RFC 9557 §3.3).
 //
-// This walks the list directly rather than using `list.all`, because the
-// `fn(tag) { .. }` it took allocated a closure on *every* call -- including
-// the overwhelmingly common suffix-free one, where `tags` is `[]` and there
-// is nothing to check. That cost ~50ns/op and made `parse_timestamp` slower
-// than `parse_ixdtf`, which does strictly more work. Never allocate on the
-// success path.
+// Walks the list directly rather than via `list.all`, whose callback would
+// allocate a closure on every call -- including the common suffix-free one,
+// where `tags` is `[]` and there is nothing to check.
 fn no_critical_flags(
   zone: Option(parser.Zone),
   tags: List(parser.Tag),
@@ -363,13 +280,9 @@ fn duration_to_minutes(offset: Duration) -> Int {
   float.round(duration.to_seconds(offset) /. 60.0)
 }
 
-// Month 1-12 and a day within that month's real length (leap-year aware) --
-// the same check `calendar.is_valid_date` makes, but straight off the ints
-// with no `calendar.Date`/`Month` construction.
-// The month length is compared inline in each arm rather than returned by a
-// `days_in_month` helper: that removes a call from every parse, and it means
-// `is_leap_year`'s three `rem` operations only run for a February 29th
-// instead of for every February date.
+// Month 1-12 and a day within that month's real length, leap-year aware.
+// The month length is compared inline in each arm, so `is_leap_year`'s three
+// `rem` operations only run for a February 29th.
 fn valid_date(year: Int, month: Int, day: Int) -> Bool {
   case month {
     1 | 3 | 5 | 7 | 8 | 10 | 12 -> day >= 1 && day <= 31
@@ -384,9 +297,8 @@ fn is_leap_year(year: Int) -> Bool {
   { year % 4 == 0 && year % 100 != 0 } || year % 400 == 0
 }
 
-/// `gleam/time/calendar.is_valid_time_of_day` is stricter than this --
-/// it doesn't allow ISO 8601's two special cases, `24:00:00` (end of day)
-/// and `23:59:60` (leap second), which osler does accept.
+/// An ordinary time of day, plus ISO 8601's two special values: `24:00:00`
+/// (end of day) and `23:59:60` (leap second).
 fn is_valid_time(hour: Int, minute: Int, second: Int) -> Bool {
   {
     hour >= 0
@@ -491,15 +403,11 @@ fn extract_time(bits: BitArray) -> Option(calendar.TimeOfDay) {
 // a scan, so a component anchored to the string start is treated as bounded.
 const byte_boundary = 0x20
 
-// Each attempt has a cheap necessary condition on the byte at the cursor (and
-// on the one before it). Checking that inline in the loop is the difference
-// between walking a string and parsing at every offset of it: `attempt` is a
-// function *value*, so calling it hands `bits` across a boundary, which on
-// BEAM materialises a sub-binary and on JS allocates a whole `BitArray`
-// wrapper. Doing that at all N positions of all five scans cost ~700-900ns per
-// byte; a 42-character string with no date in it took 39us on BEAM and 327us
-// on JS. The guard below is only ever a comparison or two, so text that cannot
-// start a component is now skipped without any of that.
+// Each attempt has a cheap necessary condition on the byte at the cursor and
+// the one before it. Checking that inline keeps the loop to a comparison or
+// two per position: `attempt` is a function *value*, so calling it hands
+// `bits` across a boundary, which materialises a sub-binary on BEAM and a
+// `BitArray` wrapper on JS.
 //
 // The conditions must stay *necessary* -- never reject a position the attempt
 // would have accepted:
@@ -560,8 +468,7 @@ fn candidate(class: Int, b: Int, prev: Int) -> Bool {
 }
 
 // Replaces the [start, end) span with a single space, so a consumed component
-// leaves a clean word boundary and cannot be re-read by a later scan (and,
-// unlike `string.replace`, only this one occurrence is removed).
+// leaves a clean word boundary and cannot be re-read by a later scan.
 fn blank(bits: BitArray, start: Int, end: Int) -> BitArray {
   let total = bit_array.byte_size(bits)
   let assert Ok(before) = bit_array.slice(bits, 0, start)
@@ -578,17 +485,15 @@ fn try_numeric_date(
   case is_digit(prev) {
     True -> Error(Nil)
     False ->
-      case internal.parse_4_digits(bits) {
+      case parser.parse_4_digits(bits) {
         Error(Nil) -> Error(Nil)
         Ok(#(year, rest)) ->
           case is_date_sep_head(rest) {
             True -> {
               let rest = drop_seps(rest)
-              use #(month, rest) <- result.try(internal.parse_1_or_2_digits(
-                rest,
-              ))
+              use #(month, rest) <- result.try(parser.parse_1_or_2_digits(rest))
               let rest = drop_seps(rest)
-              use #(day, rest) <- result.try(internal.parse_1_or_2_digits(rest))
+              use #(day, rest) <- result.try(parser.parse_1_or_2_digits(rest))
               finish_date(year, month, day, bits, rest)
             }
             False ->
@@ -633,9 +538,9 @@ fn try_named_date(
     False -> {
       use #(month, rest) <- result.try(read_month_token(bits))
       let rest = drop_seps(rest)
-      use #(day, rest) <- result.try(internal.parse_1_or_2_digits(rest))
+      use #(day, rest) <- result.try(parser.parse_1_or_2_digits(rest))
       let rest = rest |> drop_ordinal |> drop_seps
-      use #(year, rest) <- result.try(internal.parse_4_digits(rest))
+      use #(year, rest) <- result.try(parser.parse_4_digits(rest))
       case not_digit_head(rest) {
         True -> finish_date(year, month, day, bits, rest)
         False -> Error(Nil)
@@ -647,22 +552,19 @@ fn try_named_date(
 fn read_month_token(bits: BitArray) -> Result(#(Int, BitArray), Nil) {
   case read_month_name(bits) {
     Ok(found) -> Ok(found)
-    Error(Nil) -> internal.parse_1_or_2_digits(bits)
+    Error(Nil) -> parser.parse_1_or_2_digits(bits)
   }
 }
 
 // Month names, grouped by first letter and ordered long-before-short within a
-// group so `Jan` cannot shadow `January`.
-//
-// The flat 12-long + 12-short search this replaces ran at *every word start*
-// of every `try_named_date` scan -- the prefilter in `scan` lets a word start
-// through by design, since that is exactly where a month name would be. On a
-// 42-character sentence with no date in it that was ~216 case-insensitive
-// prefix comparisons; dispatching on the first byte first makes it ~20.
+// group so `Jan` cannot shadow `January`. `read_month_name` dispatches on the
+// first byte, so a word start costs a handful of comparisons rather than all
+// twenty-four names -- and the prefilter in `scan` lets every word start
+// through by design, since that is exactly where a month name would be.
 //
 // Grouping is safe because names in different groups start with different
 // letters, so no cross-group shadowing is possible, and `may` is identical in
-// both the long and short tables.
+// the long and short forms.
 const months_j = [
   #("january", 1),
   #("june", 6),
@@ -748,7 +650,7 @@ fn try_numeric_offset(bits: BitArray, _prev: Int) -> Result(#(Int, Int), Nil) {
         True -> -1
         False -> 1
       }
-      use #(hour, rest) <- result.try(internal.parse_2_digits(rest))
+      use #(hour, rest) <- result.try(parser.parse_2_digits(rest))
       let #(minute, rest) = read_offset_minutes(rest)
       case not_digit_head(rest) {
         True -> {
@@ -804,7 +706,7 @@ fn try_time(
     True -> Error(Nil)
     False -> {
       use #(hour, minute, second, rest) <- result.try(read_hms(bits))
-      use #(nanosecond, rest) <- result.try(internal.parse_optional_fraction_ns(
+      use #(nanosecond, rest) <- result.try(parser.parse_optional_fraction_ns(
         rest,
       ))
       let #(hour, rest) = apply_meridiem(hour, rest)
@@ -853,13 +755,13 @@ fn compact_hms(bits: BitArray) -> Result(#(Int, Int, Int, BitArray), Nil) {
 }
 
 fn colon_hms(bits: BitArray) -> Result(#(Int, Int, Int, BitArray), Nil) {
-  use #(hour, rest) <- result.try(internal.parse_1_or_2_digits(bits))
+  use #(hour, rest) <- result.try(parser.parse_1_or_2_digits(bits))
   case rest {
     <<0x3A, rest:bytes>> -> {
-      use #(minute, rest) <- result.try(internal.parse_1_or_2_digits(rest))
+      use #(minute, rest) <- result.try(parser.parse_1_or_2_digits(rest))
       case rest {
         <<0x3A, after_colon:bytes>> ->
-          case internal.parse_1_or_2_digits(after_colon) {
+          case parser.parse_1_or_2_digits(after_colon) {
             Ok(#(second, rest)) -> Ok(#(hour, minute, second, rest))
             Error(Nil) -> Ok(#(hour, minute, 0, rest))
           }
@@ -915,7 +817,7 @@ fn is_alpha(b: Int) -> Bool {
 }
 
 fn digits2(b1: Int, b2: Int) -> Int {
-  internal.digit_value(b1) * 10 + internal.digit_value(b2)
+  parser.digit_value(b1) * 10 + parser.digit_value(b2)
 }
 
 fn consumed(original: BitArray, rest: BitArray) -> Int {

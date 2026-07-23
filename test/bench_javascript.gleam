@@ -1,5 +1,5 @@
 //// JavaScript-target microbenchmark for the directive engine, mirroring
-//// `bench_directive_parse` (glychee only runs on Erlang). It times each parser
+//// `bench_memory` (glychee only runs on Erlang). It times each parser
 //// over many iterations on the JS target -- where `osler_ffi.mjs`'s charCode
 //// scanning is what runs -- and reports min / median / max ns/op across
 //// several rounds (each round is one full pass of `iterations` calls).
@@ -12,7 +12,7 @@
 //// - `Date.parse` (the JS engine builtin).
 ////
 //// Run with:
-////   gleam run -m bench_directive_js --target javascript
+////   gleam run -m bench_javascript --target javascript
 
 @target(javascript)
 import gleam/float
