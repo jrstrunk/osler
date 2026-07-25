@@ -413,7 +413,7 @@ fn directive_formats() -> List(#(String, List(parser.Directive))) {
     ]),
     #("weekday-num", [parser.WeekdayNumber, parser.Literal("|"), parser.Year4]),
     #("weekday-2", [parser.WeekdayShortName2, parser.Literal("|"), parser.Year4]),
-    #("end-of-input", [parser.IsoDate, parser.EndOfInput]),
+    #("iso-date", [parser.IsoDate]),
     #("multi-literal", [parser.Year4, parser.Literal("ABC"), parser.Month2]),
     #("empty", []),
   ]

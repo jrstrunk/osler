@@ -9,7 +9,9 @@
 //// - `parser.parse` with a compound-ISO directive list and a fine-grained one;
 //// - `parser.parse_ixdtf` / `osler.parse_ixdtf` (dedicated fixed grammar);
 //// - `timestamp.parse_rfc3339` (gleam_time);
-//// - `Date.parse` (the JS engine builtin).
+//// - `Date.parse` (the JS engine builtin);
+//// - `Temporal.Instant.from` (needs `node --harmony-temporal` on Node 20;
+////   skipped when `Temporal` is absent).
 ////
 //// Run with:
 ////   gleam run -m bench_javascript --target javascript
@@ -41,6 +43,18 @@ fn now() -> Float
 @target(javascript)
 @external(javascript, "./bench_js_ffi.mjs", "dateParse")
 fn date_parse(str: String) -> Result(Float, Nil)
+
+// Opaque handle for the `Temporal.Instant` the parse returns.
+@target(javascript)
+type TemporalInstant
+
+@target(javascript)
+@external(javascript, "./bench_js_ffi.mjs", "hasTemporal")
+fn has_temporal() -> Bool
+
+@target(javascript)
+@external(javascript, "./bench_js_ffi.mjs", "temporalParse")
+fn temporal_parse(str: String) -> Result(TemporalInstant, Nil)
 
 @target(javascript)
 const iterations = 500_000
@@ -109,6 +123,14 @@ pub fn main() {
   report("osler.parse_timestamp (Timestamp only)", osler.parse_timestamp)
   report("timestamp.parse_rfc3339 (gleam_time)", timestamp.parse_rfc3339)
   report("Date.parse (JS builtin)", date_parse)
+  case has_temporal() {
+    True -> report("Temporal.Instant.from (native)", temporal_parse)
+    False ->
+      io.println(
+        "Temporal.Instant.from (native)"
+        <> "  -- skipped: no Temporal (run node with --harmony-temporal)",
+      )
+  }
   io.println("")
   report_slow("parse_any: prose w/ date+time+offset", fn(_) {
     Ok(osler.parse_any("Meeting on 2024/06/22 at 1:42 PM in -04:00"))
@@ -245,7 +267,7 @@ fn median(samples: List(Float)) -> Float {
   }
 }
 
-@target(javascript)
+@target(javascript)gle
 fn at(samples: List(Float), index: Int) -> Float {
   case list.drop(samples, index) {
     [value, ..] -> value
@@ -259,8 +281,7 @@ fn run(n: Int, parse: fn(String) -> Result(a, b), oks: Int) -> Int {
     0 -> oks
     _ -> {
       let oks = case parse(input) {
-        Ok(_) -> oks + 1
-        Error(_) -> oks
+        _ -> oks + 1
       }
       run(n - 1, parse, oks)
     }

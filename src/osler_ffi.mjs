@@ -61,7 +61,6 @@ import {
   Separator,
   TimeSeparator,
   DateTimeSeparator,
-  EndOfInput,
   IsoDate,
   IsoTime,
   IsoNaiveDateTime,
@@ -1156,10 +1155,9 @@ function buildDTags() {
   [Separator, 33],
   [TimeSeparator, 34],
   [DateTimeSeparator, 35],
-  [EndOfInput, 36],
-  [IsoDate, 37],
-  [IsoTime, 38],
-  [IsoNaiveDateTime, 39],
+  [IsoDate, 36],
+  [IsoTime, 37],
+  [IsoNaiveDateTime, 38],
   ]);
 }
 
@@ -1199,10 +1197,9 @@ const D_LITERAL = 32;
 const D_SEPARATOR = 33;
 const D_TIMESEPARATOR = 34;
 const D_DATETIMESEPARATOR = 35;
-const D_ENDOFINPUT = 36;
-const D_ISODATE = 37;
-const D_ISOTIME = 38;
-const D_ISONAIVEDATETIME = 39;
+const D_ISODATE = 36;
+const D_ISOTIME = 37;
+const D_ISONAIVEDATETIME = 38;
 // One parse directive. Mutates state.i and the `p` scratch object; returns
 // false on failure.
 function stepParse(d, str, state, p) {
@@ -1251,8 +1248,9 @@ function stepParse(d, str, state, p) {
       return true;
     }
     case D_WEEKDAYNUMBER: {
+      // ISO day-of-week digit: 1 (Mon) .. 7 (Sun). Value is discarded.
       const c = str.charCodeAt(state.i);
-      if (c < CHAR_0 || c > CHAR_0 + 6) return false;
+      if (c < CHAR_0 + 1 || c > CHAR_0 + 7) return false;
       state.i += 1;
       return true;
     }
@@ -1390,8 +1388,6 @@ function stepParse(d, str, state, p) {
       }
       return false;
     }
-    case D_ENDOFINPUT:
-      return state.i === str.length;
     case D_ISODATE: {
       if (!parseDate(str, state)) return false;
       p.year = state.year;
@@ -1470,6 +1466,9 @@ export function parse(input, directives) {
   for (let c = directives; c instanceof NonEmpty; c = c.tail) {
     if (!stepParse(c.head, input, state, p)) return FALLBACK;
   }
+  // The whole input must be consumed -- leftover bytes fail the parse, matching
+  // the `Ok(#(parts, <<>>))` guard in the Gleam fallback body.
+  if (state.i !== input.length) return FALLBACK;
   const period =
     p.period === undefined ? SHARED_NONE : new Some(new p.period());
   return new Ok(
@@ -1610,7 +1609,6 @@ function stepFormat(d, parts) {
     case "Separator": return "-";
     case "TimeSeparator": return ":";
     case "DateTimeSeparator": return "T";
-    case "EndOfInput": return "";
     case "IsoDate": {
       const y = req(parts.year), m = req(parts.month), dd = req(parts.day);
       if (y === undefined || m === undefined || dd === undefined) return null;

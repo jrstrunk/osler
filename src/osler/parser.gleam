@@ -166,8 +166,8 @@ fn wrap_tags(raw: List(#(Bool, String, String))) -> List(Tag) {
 
 // --- Custom format parsing --------------------------------------------------
 
-/// The AM/PM period parsed from an `a`/`A` meridiem directive (or rendered
-/// from the hour of the day).
+/// The AM/PM period parsed from a `MeridiemLower`/`MeridiemUpper` directive
+/// (or rendered from the hour of the day).
 pub type AmPm {
   Am
   Pm
@@ -176,9 +176,10 @@ pub type AmPm {
 /// A single directive making up a custom parse/render format. A format is an
 /// ordered `List(Directive)`; `parse`/`format` walk it against the input.
 ///
-/// The field directives mirror the moment.js / Day.js vocabulary, with
-/// explicit variants for the padded and unpadded forms. Beyond those there
-/// are three extra kinds:
+/// The field directives cover the individual calendar and clock fields (year,
+/// month, day, weekday, hour, minute, second, fraction, meridiem, offset),
+/// with explicit variants for the padded and unpadded forms. Beyond those
+/// there are two extra kinds:
 ///
 ///   * **flexible separators** (`Separator`, `TimeSeparator`,
 ///     `DateTimeSeparator`) match a *class* of delimiter characters so a
@@ -186,66 +187,64 @@ pub type AmPm {
 ///     `20240613` alike -- flexibility is opt-in, per position;
 ///   * **compound ISO directives** (`IsoDate`, `IsoTime`, `IsoOffset`,
 ///     `IsoNaiveDateTime`) dispatch to osler's fast, delimiter-flexible
-///     byte scanners, for lenient ISO-8601-ish parsing in one token;
-///   * `EndOfInput` asserts the input is fully consumed (by default a parse
-///     ignores any trailing input, matching moment-style parsers).
+///     byte scanners, for lenient ISO-8601-ish parsing in one directive.
 pub type Directive {
-  /// `YYYY` -- four-digit year.
+  /// Four-digit year.
   Year4
-  /// `M` -- one or two digit month.
+  /// One or two digit month.
   Month
-  /// `MM` -- two-digit month.
+  /// Two-digit month.
   Month2
-  /// `MMM` -- short English month name (`Jan`..`Dec`).
+  /// Short English month name (`Jan`..`Dec`).
   MonthShortName
-  /// `MMMM` -- full English month name (`January`..`December`).
+  /// Full English month name (`January`..`December`).
   MonthLongName
-  /// `D` -- one or two digit day of month.
+  /// One or two digit day of month.
   Day
-  /// `DD` -- two-digit day of month.
+  /// Two-digit day of month.
   Day2
-  /// `d` -- ISO day-of-week number (parse: a single `0`-`6` digit, matched
-  /// then discarded; render: `1` (Mon) .. `7` (Sun)).
+  /// ISO day-of-week number, `1` (Mon) .. `7` (Sun) (parse: a single `1`-`7`
+  /// digit, matched then discarded; render derives it from the date).
   WeekdayNumber
-  /// `dd` -- two-letter English weekday (`Su`..`Sa`); discarded on parse.
+  /// Two-letter English weekday (`Su`..`Sa`); discarded on parse.
   WeekdayShortName2
-  /// `ddd` -- short English weekday (`Sun`..`Sat`); discarded on parse.
+  /// Short English weekday (`Sun`..`Sat`); discarded on parse.
   WeekdayShortName
-  /// `dddd` -- full English weekday (`Sunday`..`Saturday`); discarded on parse.
+  /// Full English weekday (`Sunday`..`Saturday`); discarded on parse.
   WeekdayLongName
-  /// `H` -- one or two digit 24-hour hour.
+  /// One or two digit 24-hour hour.
   Hour24
-  /// `HH` -- two-digit 24-hour hour.
+  /// Two-digit 24-hour hour.
   Hour24Padded
-  /// `h` -- one or two digit 12-hour hour.
+  /// One or two digit 12-hour hour.
   Hour12
-  /// `hh` -- two-digit 12-hour hour.
+  /// Two-digit 12-hour hour.
   Hour12Padded
-  /// `a` -- lowercase meridiem (`am`/`pm`).
+  /// Lowercase meridiem (`am`/`pm`).
   MeridiemLower
-  /// `A` -- uppercase meridiem (`AM`/`PM`).
+  /// Uppercase meridiem (`AM`/`PM`).
   MeridiemUpper
-  /// `m` -- one or two digit minute.
+  /// One or two digit minute.
   Minute
-  /// `mm` -- two-digit minute.
+  /// Two-digit minute.
   Minute2
-  /// `s` -- one or two digit second.
+  /// One or two digit second.
   Second
-  /// `ss` -- two-digit second.
+  /// Two-digit second.
   Second2
-  /// `SSS` -- three fractional digits (milliseconds), stored as nanoseconds.
+  /// Three fractional digits (milliseconds), stored as nanoseconds.
   Milli
-  /// `SSSS` -- six fractional digits (microseconds), stored as nanoseconds.
+  /// Six fractional digits (microseconds), stored as nanoseconds.
   Micro
   /// Nine fractional digits (nanoseconds).
   Nano
-  /// `z` -- offset, condensed: `Z`, `±HH`, `±HH:MM`.
+  /// Offset, condensed: `Z`, `±HH`, `±HH:MM`.
   Offset
-  /// `zz` -- offset: `Z` when zero, otherwise `±HH:MM`.
+  /// Offset: `Z` when zero, otherwise `±HH:MM`.
   OffsetZulu
-  /// `Z` -- offset, always `±HH:MM`.
+  /// Offset, always `±HH:MM`.
   OffsetColon
-  /// `ZZ` -- offset, always `±HHMM`.
+  /// Offset, always `±HHMM`.
   OffsetNoColon
   /// The literal string `GMT`, meaning a zero offset.
   Gmt
@@ -253,8 +252,7 @@ pub type Directive {
   ZoneName
   /// A run of RFC 9557 `[key=value]` extension tags.
   ExtensionTags
-  /// A literal string that must appear verbatim in the input (this is what an
-  /// escaped `[..]` group and any non-directive characters become).
+  /// A literal string that must appear verbatim in the input.
   Literal(String)
   /// Zero or one of `-` `/` `.` `_` space -- a flexible date delimiter.
   Separator
@@ -262,13 +260,11 @@ pub type Directive {
   TimeSeparator
   /// Exactly one of `T` `t` `_` space -- a date/time delimiter.
   DateTimeSeparator
-  /// Matches only at the end of the input.
-  EndOfInput
-  /// A full delimiter-flexible ISO date (`YYYY-MM-DD`, `YYYY/MM/DD`,
-  /// compact `YYYYMMDD`, ...).
+  /// A full delimiter-flexible ISO date (`2024-06-13`, `2024/06/13`, compact
+  /// `20240613`, ...).
   IsoDate
-  /// A full delimiter-flexible ISO time (`HH:MM:SS.fff`, `HH:MM`, compact
-  /// `HHMMSS`, ...).
+  /// A full delimiter-flexible ISO time (`13:42:11.500`, `13:42`, compact
+  /// `134211`, ...).
   IsoTime
   /// A full ISO offset (`Z`, `±HH:MM`, `±HHMM`, `±HH`, `±H`).
   IsoOffset
@@ -306,14 +302,14 @@ pub fn empty_parts() -> Parts {
 }
 
 /// Parses `input` against the ordered `directives`, returning the raw,
-/// unvalidated `Parts` each directive filled in. Any input left over after
-/// the last directive is ignored; add a trailing `EndOfInput` to require the
-/// whole input to be consumed.
+/// unvalidated `Parts` each directive filled in. The whole input must be
+/// consumed: any bytes left over after the last directive fail the parse, so
+/// the directives have to account for the input exactly.
 @external(javascript, "../osler_ffi.mjs", "parse")
 pub fn parse(input: String, directives: List(Directive)) -> Result(Parts, Nil) {
   case run(bit_array.from_string(input), directives, empty_parts()) {
-    Ok(#(parts, _rest)) -> Ok(parts)
-    Error(Nil) -> Error(Nil)
+    Ok(#(parts, <<>>)) -> Ok(parts)
+    _ -> Error(Nil)
   }
 }
 
@@ -324,7 +320,7 @@ pub fn parse(input: String, directives: List(Directive)) -> Result(Parts, Nil) {
 // (`with_int`, `keep`, `with_ampm`, and the `consume_*` family) take `ds` and
 // tail-call `run` for the same reason.
 //
-// `step`'s `case directive` is exhaustive over all 40 variants with no
+// `step`'s `case directive` is exhaustive over all 39 variants with no
 // catch-all, so adding a `Directive` is a compile error until it is handled
 // here.
 fn run(
@@ -579,11 +575,6 @@ fn step(
     Separator -> run(consume_separator(bytes), ds, parts)
     TimeSeparator -> run(consume_time_separator(bytes), ds, parts)
     DateTimeSeparator -> consume_datetime_separator(bytes, ds, parts)
-    EndOfInput ->
-      case accept_end(bytes) {
-        Ok(Nil) -> run(bytes, ds, parts)
-        Error(Nil) -> Error(Nil)
-      }
     IsoDate -> consume_iso_date(bytes, ds, parts)
     IsoTime -> consume_iso_time(bytes, ds, parts)
     IsoNaiveDateTime -> consume_iso_naive(bytes, ds, parts)
@@ -725,7 +716,7 @@ fn consume_month_long(bytes: BitArray) -> Result(#(Int, BitArray), Nil) {
 
 fn consume_weekday_number(bytes: BitArray) -> Result(BitArray, Nil) {
   case bytes {
-    <<b, rest:bytes>> if b >= 0x30 && b <= 0x36 -> Ok(rest)
+    <<b, rest:bytes>> if b >= 0x31 && b <= 0x37 -> Ok(rest)
     _ -> Error(Nil)
   }
 }
@@ -940,7 +931,6 @@ fn render(directive: Directive, parts: Parts) -> Result(String, Nil) {
     Separator -> Ok("-")
     TimeSeparator -> Ok(":")
     DateTimeSeparator -> Ok("T")
-    EndOfInput -> Ok("")
     IsoDate -> render_iso_date(parts)
     IsoTime -> render_iso_time(parts)
     IsoOffset -> parts.offset_minutes |> req |> result.map(render_offset_zulu)
@@ -1310,7 +1300,7 @@ pub fn parse_1_or_2_digits(bytes: BitArray) -> Result(#(Int, BitArray), Nil) {
 
 /// Parses exactly `n` digits into a single int, failing if fewer than `n`
 /// digits are present. Used by the fixed-width format directives (a 4-digit
-/// year, a 3-digit `SSS`, a 9-digit `Nano`, etc).
+/// `Year4`, a 3-digit `Milli`, a 9-digit `Nano`, etc).
 pub fn parse_n_digits(
   bytes: BitArray,
   n: Int,

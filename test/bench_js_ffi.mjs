@@ -13,6 +13,18 @@ export function now() {
 // epoch-milliseconds number, or Error on an unparseable string (Date.parse
 // yields NaN).
 export function dateParse(str) {
-  const ms = Date.parse(str);
-  return Number.isNaN(ms) ? new Error(undefined) : new Ok(ms);
+  return Date.parse(str);
+}
+
+// `Temporal` is not yet unflagged on Node 20 -- the benchmark skips the
+// Temporal row rather than timing 500k thrown ReferenceErrors.
+export function hasTemporal() {
+  return typeof Temporal !== "undefined";
+}
+
+// `Temporal.Instant.from`, the native parser that does the same job as
+// `osler.parse_ixdtf`: a validated, nanosecond-precision instant. Throws on
+// an unparseable string, so wrap in a Result.
+export function temporalParse(str) {
+  return Temporal.Instant.from(str);
 }

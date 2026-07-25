@@ -1,11 +1,11 @@
 import gleam/option.{None, Some}
-import osler/parser.{EndOfInput, IsoDate, IsoNaiveDateTime, IsoOffset, IsoTime}
+import osler/parser.{IsoDate, IsoNaiveDateTime, IsoOffset, IsoTime}
 
 // The raw `parser.parse` returns unvalidated `Parts`; these cover the
 // structural parsing the deleted `parse_date`/`parse_time`/`parse_offset`/
 // `parse_naive_datetime` functions used to, now reached through the compound
-// ISO directives. A trailing `EndOfInput` is used wherever full consumption
-// matters (a bare `parse` ignores trailing input).
+// ISO directives. `parse` requires the whole input to be consumed, so a
+// directive list that leaves trailing bytes fails.
 
 pub fn iso_date_basic_test() {
   let assert Ok(a) = parser.parse("2024-06-13", [IsoDate])
@@ -20,7 +20,7 @@ pub fn iso_date_basic_test() {
 
 pub fn iso_date_delimiters_test() {
   let for = fn(s) {
-    let assert Ok(p) = parser.parse(s, [IsoDate, EndOfInput])
+    let assert Ok(p) = parser.parse(s, [IsoDate])
     #(p.year, p.month, p.day)
   }
   assert for("2024.06.13") == #(Some(2024), Some(6), Some(13))
@@ -38,10 +38,10 @@ pub fn iso_date_no_semantic_validation_test() {
 }
 
 pub fn iso_date_invalid_shape_test() {
-  assert parser.parse("", [IsoDate, EndOfInput]) == Error(Nil)
-  assert parser.parse("2024-06-13a", [IsoDate, EndOfInput]) == Error(Nil)
-  assert parser.parse("2046", [IsoDate, EndOfInput]) == Error(Nil)
-  assert parser.parse("20-06-13", [IsoDate, EndOfInput]) == Error(Nil)
+  assert parser.parse("", [IsoDate]) == Error(Nil)
+  assert parser.parse("2024-06-13a", [IsoDate]) == Error(Nil)
+  assert parser.parse("2046", [IsoDate]) == Error(Nil)
+  assert parser.parse("20-06-13", [IsoDate]) == Error(Nil)
 }
 
 pub fn iso_time_basic_test() {
@@ -92,8 +92,8 @@ pub fn iso_time_no_semantic_validation_test() {
 }
 
 pub fn iso_time_invalid_shape_test() {
-  assert parser.parse("19", [IsoTime, EndOfInput]) == Error(Nil)
-  assert parser.parse("", [IsoTime, EndOfInput]) == Error(Nil)
+  assert parser.parse("19", [IsoTime]) == Error(Nil)
+  assert parser.parse("", [IsoTime]) == Error(Nil)
 }
 
 pub fn iso_offset_basic_test() {
@@ -125,27 +125,24 @@ pub fn iso_offset_minute_sixty_quirk_test() {
   let assert Ok(a) = parser.parse("+00:60", [IsoOffset])
   assert a.offset_minutes == Some(60)
 
-  assert parser.parse("+00:61", [IsoOffset, EndOfInput]) == Error(Nil)
+  assert parser.parse("+00:61", [IsoOffset]) == Error(Nil)
 }
 
 pub fn iso_naive_datetime_test() {
-  let assert Ok(a) =
-    parser.parse("2024-06-13T13:42:11", [IsoNaiveDateTime, EndOfInput])
+  let assert Ok(a) = parser.parse("2024-06-13T13:42:11", [IsoNaiveDateTime])
   assert #(a.year, a.month, a.day, a.hour, a.minute, a.second)
     == #(Some(2024), Some(6), Some(13), Some(13), Some(42), Some(11))
 
-  let assert Ok(b) =
-    parser.parse("2024-06-13 13:42:11", [IsoNaiveDateTime, EndOfInput])
+  let assert Ok(b) = parser.parse("2024-06-13 13:42:11", [IsoNaiveDateTime])
   assert b.hour == Some(13)
 
-  let assert Ok(c) = parser.parse("2024-06-13", [IsoNaiveDateTime, EndOfInput])
+  let assert Ok(c) = parser.parse("2024-06-13", [IsoNaiveDateTime])
   assert #(c.day, c.hour) == #(Some(13), None)
 }
 
 pub fn iso_naive_datetime_invalid_test() {
-  assert parser.parse("2024-06-13|13:42:11", [IsoNaiveDateTime, EndOfInput])
-    == Error(Nil)
-  assert parser.parse("2024-06", [IsoNaiveDateTime, EndOfInput]) == Error(Nil)
-  assert parser.parse("13:42:11", [IsoNaiveDateTime, EndOfInput]) == Error(Nil)
-  assert parser.parse("", [IsoNaiveDateTime, EndOfInput]) == Error(Nil)
+  assert parser.parse("2024-06-13|13:42:11", [IsoNaiveDateTime]) == Error(Nil)
+  assert parser.parse("2024-06", [IsoNaiveDateTime]) == Error(Nil)
+  assert parser.parse("13:42:11", [IsoNaiveDateTime]) == Error(Nil)
+  assert parser.parse("", [IsoNaiveDateTime]) == Error(Nil)
 }

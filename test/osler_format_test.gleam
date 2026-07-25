@@ -1,11 +1,11 @@
 import gleam/option.{None, Some}
 import osler/parser.{
-  type Directive, Am, Day, Day2, EndOfInput, ExtensionTags, Hour12, Hour12Padded,
-  Hour24, Hour24Padded, IsoDate, IsoNaiveDateTime, IsoTime, Literal,
-  MeridiemLower, MeridiemUpper, Micro, Milli, Minute, Minute2, Month, Month2,
-  MonthLongName, MonthShortName, Offset, OffsetColon, OffsetNoColon, Parts, Pm,
-  Second, Second2, Separator, Tag, WeekdayLongName, WeekdayNumber,
-  WeekdayShortName, WeekdayShortName2, Year4, Zone, ZoneName,
+  type Directive, Am, Day, Day2, ExtensionTags, Hour12, Hour12Padded, Hour24,
+  Hour24Padded, IsoDate, IsoNaiveDateTime, IsoTime, Literal, MeridiemLower,
+  MeridiemUpper, Micro, Milli, Minute, Minute2, Month, Month2, MonthLongName,
+  MonthShortName, Offset, OffsetColon, OffsetNoColon, Parts, Pm, Second, Second2,
+  Separator, Tag, WeekdayLongName, WeekdayNumber, WeekdayShortName,
+  WeekdayShortName2, Year4, Zone, ZoneName,
 }
 
 fn sp(items: List(Directive)) -> List(Directive) {
@@ -21,14 +21,13 @@ fn sp(items: List(Directive)) -> List(Directive) {
 
 pub fn parse_date_literals_test() {
   let assert Ok(p) =
-    parser.parse("2024/06/08, 13:42:11", [
+    parser.parse("2024/06/08", [
       Year4,
       Literal("/"),
       Month2,
       Literal("/"),
       Day2,
     ])
-  // trailing ", 13:42:11" is ignored
   assert p.year == Some(2024)
   assert p.month == Some(6)
   assert p.day == Some(8)
@@ -169,26 +168,25 @@ pub fn parse_iso_time_test() {
 }
 
 pub fn parse_iso_naive_test() {
-  let assert Ok(a) =
-    parser.parse("2024-06-13T13:42:11", [IsoNaiveDateTime, EndOfInput])
+  let assert Ok(a) = parser.parse("2024-06-13T13:42:11", [IsoNaiveDateTime])
   assert a.year == Some(2024)
   assert a.hour == Some(13)
 
-  let assert Ok(b) =
-    parser.parse("2024-06-13 13:42:11", [IsoNaiveDateTime, EndOfInput])
+  let assert Ok(b) = parser.parse("2024-06-13 13:42:11", [IsoNaiveDateTime])
   assert b.hour == Some(13)
 
-  let assert Ok(c) = parser.parse("2024-06-13", [IsoNaiveDateTime, EndOfInput])
+  let assert Ok(c) = parser.parse("2024-06-13", [IsoNaiveDateTime])
   assert c.hour == None
   assert c.day == Some(13)
 }
 
-// --- EndOfInput -------------------------------------------------------------
+// --- full consumption -------------------------------------------------------
 
-pub fn parse_end_of_input_test() {
-  assert parser.parse("2024-06-13xyz", [IsoDate, EndOfInput]) == Error(Nil)
+pub fn parse_rejects_trailing_input_test() {
+  // A parse must account for the whole input -- leftover bytes fail.
+  assert parser.parse("2024-06-13xyz", [IsoDate]) == Error(Nil)
 
-  let assert Ok(_) = parser.parse("2024-06-13", [IsoDate, EndOfInput])
+  let assert Ok(_) = parser.parse("2024-06-13", [IsoDate])
   Nil
 }
 
@@ -364,6 +362,31 @@ pub fn format_weekday_friday_test() {
       MeridiemUpper,
     ])
     == Ok("Fri @ 1:42 PM")
+}
+
+pub fn weekday_number_iso_test() {
+  // 2024-06-02 is a Sunday -> ISO 7 (not moment-style 0).
+  let sunday =
+    Parts(
+      Some(2024),
+      Some(6),
+      Some(2),
+      None,
+      None,
+      None,
+      None,
+      None,
+      None,
+      None,
+      None,
+      [],
+    )
+  assert parser.format(sunday, [WeekdayNumber]) == Ok("7")
+
+  // Parse accepts the ISO 1-7 range (the digit is matched then discarded)...
+  let assert Ok(_) = parser.parse("7", [WeekdayNumber])
+  // ...and rejects the moment-style 0.
+  assert parser.parse("0", [WeekdayNumber]) == Error(Nil)
 }
 
 // --- round trips ------------------------------------------------------------
