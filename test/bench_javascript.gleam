@@ -267,7 +267,7 @@ fn median(samples: List(Float)) -> Float {
   }
 }
 
-@target(javascript)gle
+@target(javascript)
 fn at(samples: List(Float), index: Int) -> Float {
   case list.drop(samples, index) {
     [value, ..] -> value
