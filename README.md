@@ -6,6 +6,9 @@
 ```sh
 gleam add osler@1
 ```
+
+Fast IXDTF and custom datetime parsing and formatting. Named after A. Follett Osler, a scientist who successfully advocated for the standardization of Greenwich Mean Time within Europe.
+
 ```gleam
 import osler
 
